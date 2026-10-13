@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[codz]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Environments and editors
+.venv/
+venv/
+.venv-harbor-*/
+.env
+.envrc
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Build and runtime outputs
+build/
+dist/
+runs/
+logs/
+wandb/
+
+# Local task caches and private launch configurations
+harbor_datasets/
+.backends/
+.tools/
+.worktrees/
+benchmarks/harbor/0.5-mvp/
+docs/
+local/
+configs/site/
+examples/**/private*
