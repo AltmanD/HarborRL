@@ -2,9 +2,9 @@
   <img src="assets/HarborRL-title.jpg" alt="HarborRL" width=800>
 </p>
 
-<p align="center">
+<!-- <p align="center">
   <h1>HarborRL</h1>
-</p>
+</p> -->
 
 <p align="center">
   <strong>A lightweight agentic reinforcement learning framework for everyone</strong>
