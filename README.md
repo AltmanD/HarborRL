@@ -25,6 +25,8 @@
 
 ## News
 
+- **2026-10-26** Added an [offline configuration wizard](docs/configuration-wizard.md) and a [local Web console](docs/web-console.md) for configuration, validation, dry-runs, training launch, and logs.
+- **2026-10-26** Added [controller/GPU deployment configuration](docs/deployment.md), optional [OpenSandbox execution](docs/sandbox-rollout.md), and opt-in [train/inference consistency checks](docs/train-inference-consistency.md).
 - **10/2026** 📣📣📣 HarborRL released
 
 ## About
@@ -40,10 +42,11 @@ HarborRL supports flexible combinations of **Models × Algorithms × Tasks × Ha
 
 ## AI-assisted Configure
 
-[Math training pipeline](docs/math-distill.md). It includes explicit synthetic
-fixtures for testing real optimizer updates and checkpoint restore.
+For the optional math training workflow, see the [math training guide](docs/math-distill.md).
+It includes explicit synthetic fixtures for testing optimizer updates and checkpoint restore.
 
-answer-file setup, see the [configuration CLI guide](docs/configuration-wizard.md).
+For the offline options catalog, interactive configuration, and answer-file setup,
+see the [configuration CLI guide](docs/configuration-wizard.md).
 Start with `harborrl options` or `harborrl init --help`.
 
 Run `harborrl web` to open the local browser console for configuration, validation,
