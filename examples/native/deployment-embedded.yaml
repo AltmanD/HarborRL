@@ -1,0 +1,45 @@
+# Embedded (same-machine) deployment: identical to the legacy pipeline.
+# Use this file explicitly, or simply omit --deployment to get the same
+# embedded-local topology built from the training config.
+schema_version: 1
+
+manager:
+  id: embedded-local
+  mode: embedded
+  bind: 127.0.0.1
+  control_port: 49200
+  control_url: http://127.0.0.1:49200
+  gateway_port: 49184
+  gateway_url: http://127.0.0.1:49184
+  run_token_file: /run/secrets/harborrl/run-token
+  source_dir: /opt/harborrl/source
+  controller_python: /opt/harborrl/controller/bin/python
+
+gpu_target:
+  id: local
+  transport: local
+  ssh: null
+  source_dir: /opt/harborrl/source
+  train_python: /opt/harborrl/training/bin/python
+  environment_file: null
+  expected_gpus: 8
+
+storage:
+  mode: shared_fs
+  run_root: /mnt/shared/harborrl/runs
+  manager_writable: true
+  gpu_writable: true
+  worker_writable: true
+
+rollout:
+  # The embedded provider keeps worker discovery in the training config.
+  provider: embedded
+  workers: []
+
+connectivity:
+  command_timeout_s: 30
+  ssh_timeout_s: 15
+  http_timeout_s: 10
+  gpu_to_controller: true
+  worker_to_gateway: true
+  manager_to_gpu_inference: true

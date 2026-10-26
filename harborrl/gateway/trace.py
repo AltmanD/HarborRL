@@ -94,6 +94,19 @@ class TraceRegistry:
             state["pending"].discard(matches[0]["request_id"])
             self.changed.notify_all()
 
+    def wait_delivered(self, aid, timeout):
+        deadline = time.monotonic() + timeout
+        with self.changed:
+            state = self.attempts[aid]
+            while state["pending"]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("policy delivery acknowledgement still pending")
+                self.changed.wait(remaining)
+            if any(turn.get("delivery") not in ("sent", "consumed_confirmed")
+                   for turn in state["turns"]):
+                raise ValueError("policy response delivery was not confirmed")
+
     def consume(self, aid, response_id, content, evidence_ref):
         """Called only by trusted native-session audit, never by an HTTP policy client."""
         with self.lock:
@@ -108,6 +121,13 @@ class TraceRegistry:
                 raise ValueError("consumed response differs or delivery is unknown")
             publish(state["root"] / "consumption" / f"{response_id}.json", {"response_id": response_id, "content_digest": digest(content), "evidence_ref": evidence_ref})
             turn.update(delivery="consumed_confirmed", consumption_ref=evidence_ref)
+
+    def unconsumed_responses(self, aid):
+        with self.lock:
+            state = self.attempts[aid]
+            return [{"response_id": turn["response_id"], "content": deepcopy(turn["response"]["content"]),
+                     "finish_reason": turn.get("finish_reason"), "is_final": index == len(state["turns"]) - 1}
+                    for index, turn in enumerate(state["turns"]) if turn.get("delivery") != "consumed_confirmed"]
 
     def close(self, aid):
         with self.lock:

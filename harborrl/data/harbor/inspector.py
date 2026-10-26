@@ -1,33 +1,14 @@
-"""Conservative inspection of pinned local Harbor tasks."""
+"""Legacy TerminalEnv compatibility tooling; native training does not use this path."""
 
-import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .receipt import parse_reward
+from harborrl.tasks.content import tomllib, tree_digest  # compatibility exports
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
+from .receipt import parse_reward
 
 PROFILE = "terminal_text_v1"
 REWARD_PROFILE = "harbor_reward_txt_v1"
-
-
-def tree_digest(root: Path, *, exclude: tuple[str, ...] = ()) -> str:
-    h = hashlib.sha256()
-    for path in sorted(Path(root).rglob("*")):
-        if str(path.relative_to(root)) in exclude:
-            continue
-        if path.is_symlink():
-            raise ValueError("symlinks are not supported")
-        if path.is_file():
-            data = path.read_bytes()
-            h.update(str(path.relative_to(root)).encode() + b"\0")
-            h.update(str(path.stat().st_mode & 0o777).encode() + b"\0")
-            h.update(str(len(data)).encode() + b"\0" + data)
-    return h.hexdigest()
 
 
 @dataclass(frozen=True)

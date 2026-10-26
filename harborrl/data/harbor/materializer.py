@@ -1,4 +1,4 @@
-"""Publish a task without changing its verifier or Docker build context."""
+"""Legacy TerminalEnv compatibility tooling; native training does not use this path."""
 
 import json
 import shutil

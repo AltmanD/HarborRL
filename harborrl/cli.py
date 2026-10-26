@@ -4,18 +4,39 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-
-ALGORITHM_CONTRACTS = {"grpo": "slime-v0.3.2-native-v1"}
+from pathlib import Path
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "distill":
+        from harborrl.distill.cli import main as distill_main
+
+        return distill_main(argv[1:])
+    if argv and argv[0] == "web":
+        from harborrl.webui.cli import main as web_main
+
+        return web_main(argv[1:])
+    if argv and argv[0] in {"options", "validate", "init"}:
+        from harborrl.options.cli import main as options_main
+
+        return options_main(argv)
+    if argv and argv[0] == "list":
+        from harborrl.math_registry import list_components
+
+        choices = {"models", "algorithms", "tasks", "harnesses"}
+        if len(argv) != 2 or argv[1] not in choices:
+            parser = argparse.ArgumentParser(prog="harborrl list")
+            parser.error("choose one of: " + ", ".join(sorted(choices)))
+        print(json.dumps(list_components()[argv[1]], indent=2))
+        return 0
     if argv and argv[0] == "hub":
         from harborrl.tasks.cli import main as hub_main
 
         return hub_main(argv[1:])
     parser = argparse.ArgumentParser(
-        prog="harborrl", description=__doc__, allow_abbrev=False
+        prog="harborrl", description=__doc__, allow_abbrev=False,
+        epilog="Configuration tools: harborrl options --help; harborrl validate --help; harborrl init --help; harborrl web --help."
     )
     parser.add_argument("-model", help="Slime model preset to select")
     parser.add_argument("-harness", help="agent harness to select")
@@ -24,10 +45,13 @@ def main(argv=None):
     parser.add_argument("command", choices=["train", "doctor"])
     parser.add_argument("config_path", nargs="?", help="YAML configuration file")
     parser.add_argument("--config", dest="config_option", help="YAML configuration file")
+    parser.add_argument("--deployment", help="deployment YAML describing the manager, GPU target and rollout workers")
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     from harborrl.config import launch_plan, load_config
+    from harborrl.deployment.schema import embedded_local, load_deployment
+    from harborrl.deployment.schema import summary as deployment_summary
 
     if args.config_path and args.config_option:
         parser.error(
@@ -46,20 +70,36 @@ def main(argv=None):
     if args.harness is not None:
         overrides.append(f"harness.name={args.harness.replace('-', '_')}")
     if args.alg is not None:
-        contract = ALGORITHM_CONTRACTS.get(args.alg)
-        if contract is None:
+        from harborrl.math_registry import MATH_REGISTRY
+
+        matches = [
+            spec for spec in MATH_REGISTRY.algorithms.items()
+            if args.alg in (spec.id,)
+        ]
+        if not matches:
             parser.error(
                 f"unsupported algorithm: {args.alg}; "
-                f"supported algorithms: {', '.join(sorted(ALGORITHM_CONTRACTS))}"
+                f"supported algorithms: "
+                f"{', '.join(spec.id for spec in MATH_REGISTRY.algorithms.items())}"
             )
+        contract = next(iter(matches[0].training_backend_contracts))
         overrides.append(f"training.backend_contract={contract}")
 
     try:
-        plan = launch_plan(load_config(
+        config = load_config(
             config_path,
             overrides,
             task_ids=None if args.task is None else [args.task],
-        ))
+        )
+        deployment, deployment_source = load_deployment(args.deployment)
+        if deployment_source == "embedded-local":
+            deployment = embedded_local(
+                run_root=str(Path(config["output"]["root"]).resolve()),
+                workers=config["harbor"]["workers"],
+                expected_gpus=config["deployment"]["num_gpus"],
+            )
+        plan = launch_plan(config)
+        plan["deployment"] = deployment_summary(deployment, deployment_source)
     except (TypeError, ValueError, OSError) as exc:
         parser.error(str(exc))
     if args.dry_run:

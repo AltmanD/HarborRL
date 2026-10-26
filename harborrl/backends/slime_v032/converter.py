@@ -131,6 +131,8 @@ def convert_samples_to_train_data(args, samples):
         data["loss_masks"].append(response_mask)
         data["rollout_log_probs"].append(list(span.old_logprobs))
         data["rollout_mask_sums"].append(unit.token_count)
+        from harborrl.consistency.slime import record_turn
+        record_turn(ir["turns"][turn_index], list(span.tokens), list(span.old_logprobs), response_mask)
     for group in batch.groups:
         weight_sum = math.fsum(
             1.0 / (group.group_size * unit.token_count)

@@ -20,6 +20,8 @@ def validate_pool(states, expected=None):
 def publish_pool(states, expected=None):
     version = validate_pool(states, expected)
     root = Path(os.environ['RUN_DIR'])
+    from harborrl.consistency.sglang import admit_pool
+    admit_pool(states, root)
     payload = {'weight_version': version, 'engines': states, 'timestamp': time.time()}
     temp = root / 'policy-pool.tmp'
     temp.write_text(json.dumps(payload) + '\n')

@@ -35,7 +35,12 @@ def test_restart_cannot_reopen_persisted_attempt(tmp_path):
 
 def test_profile_controls_reach_agent_and_host():
     config = claude_config(PROFILE, "http://gateway:8000", "token")
+    assert config["kwargs"]["disallowed_tools"] == "Agent,Task"
+    disabled = claude_config({**PROFILE, "disallowed_tools": "Agent,Task,WebSearch,WebFetch"},
+                             "http://gateway:8000", "token")
+    assert disabled["kwargs"]["disallowed_tools"] == "Agent,Task,WebSearch,WebFetch"
     assert config["env"]["DISABLE_AUTO_COMPACT"] == "1"
+    assert config["env"]["ANTHROPIC_MODEL"] == "policy"
     assert config["env"]["NO_PROXY"] == "gateway"
     assert config["env"]["no_proxy"] == "gateway"
     assert config["kwargs"]["version"] == "2.1.0"

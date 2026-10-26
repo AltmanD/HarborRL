@@ -110,7 +110,7 @@ def make_server(gateway, host="127.0.0.1", port=0, *, max_body_bytes=8 * 1024 * 
                     gateway.registry.delivery(aid, message["id"], "delivery_unknown")
                 status = 401 if isinstance(exc, PermissionError) else 400 if isinstance(exc, (ProtocolError, json.JSONDecodeError)) else 502
                 # Do not echo backend errors or request contents (credentials may appear there).
-                self.reply(status, {"type": "error", "error": {"type": "authentication_error" if status == 401 else "invalid_request_error" if status == 400 else "api_error", "message": type(exc).__name__}})
+                self.reply(status, {"type": "error", "error": {"type": "authentication_error" if status == 401 else "invalid_request_error" if status == 400 else "api_error", "message": f"{type(exc).__name__}: {exc}"}})
 
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True

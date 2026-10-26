@@ -171,12 +171,19 @@ TRAIN_ARGS=(
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 TRAIN_PYTHON="${TRAIN_PYTHON:-python3}"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+ENTRY=("${SLIME_DIR}/train.py")
+if [[ "${HARBORRL_CONSISTENCY_MODE:-off}" != "off" ]]; then
+  ENTRY=(-m harborrl.consistency.train)
+fi
+
+"${TRAIN_PYTHON}" -m harborrl.platform.evidence "${RUN_DIR}" "${DRY_RUN:-0}" \
+  "${TRAIN_PYTHON}" -u "${ENTRY[@]}" "${TRAIN_ARGS[@]}"
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   printf '[dry-run] '
-  printf '%q ' "${TRAIN_PYTHON}" -u "${SLIME_DIR}/train.py" "${TRAIN_ARGS[@]}"
+  printf '%q ' "${TRAIN_PYTHON}" -u "${ENTRY[@]}" "${TRAIN_ARGS[@]}"
   printf '\n'
   exit 0
 fi
 
-exec "${TRAIN_PYTHON}" -u "${SLIME_DIR}/train.py" "${TRAIN_ARGS[@]}"
+exec "${TRAIN_PYTHON}" -u "${ENTRY[@]}" "${TRAIN_ARGS[@]}"

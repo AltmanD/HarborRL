@@ -65,9 +65,10 @@ def test_tool_roundtrip():
         convert(p, model="policy")
 
 
-def test_claude_2_1_220_control_turns_are_accepted_without_hidden_sampling():
+@pytest.mark.parametrize("effort", ["high", "xhigh"])
+def test_claude_2_1_control_turns_are_accepted_without_hidden_sampling(effort):
     converted = convert(payload(
-        output_config={"effort": "high"},
+        output_config={"effort": effort},
         thinking={"type": "adaptive"},
         context_management={"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
         system=[{"type": "text", "text": "locked system prompt"}],
@@ -239,6 +240,32 @@ def test_nonfinite_generated_tool_is_rejected():
                           response_id="m", tools=[{"function": {"name": "bash"}}])
 
 
+def test_generated_tool_errors_distinguish_name_and_arguments():
+    tools = [{"function": {"name": "bash"}}]
+    with pytest.raises(ProtocolError, match="unknown generated tool"):
+        parse_qwen_output('<tool_call>{"name":"sh","arguments":{}}</tool_call>',
+                          response_id="m", tools=tools)
+    with pytest.raises(ProtocolError, match="arguments are not an object"):
+        parse_qwen_output('<tool_call>{"name":"bash","arguments":[]}</tool_call>',
+                          response_id="m", tools=tools)
+
+
+def test_generated_tool_name_alias_is_canonicalized_only_when_unique():
+    tools = [{"function": {"name": "Bash"}}]
+    output = parse_qwen_output('<tool_call>{"name":"bash","arguments":{"command":"pwd"}}</tool_call>',
+                               response_id="m", tools=tools)
+    assert output[0]["name"] == "Bash"
+    with pytest.raises(ProtocolError, match="unknown generated tool"):
+        parse_qwen_output('<tool_call>{"name":"sh","arguments":{}}</tool_call>',
+                          response_id="m", tools=tools)
+
+
+def test_qwen_finish_marker_maps_to_empty_end_turn():
+    output = parse_qwen_output('<tool_call>{"name":"finish","arguments":{}}</tool_call>',
+                               response_id="m", tools=[{"function": {"name": "Bash"}}])
+    assert output == []
+
+
 def test_sglang_generation_version_and_logprob_evidence():
     from harborrl.gateway.sglang_backend import SGLangBackend
     class Tokenizer:
@@ -246,7 +273,11 @@ def test_sglang_generation_version_and_logprob_evidence():
             return [11, 12]
         def decode(self, token_ids, skip_special_tokens):
             return "done"
-    backend = SGLangBackend("http://engine", Tokenizer(), tokenizer_digest="tok", template_digest="tpl")
+    from harborrl.models.qwen import QwenModelAdapter
+    backend = SGLangBackend(
+        "http://engine", Tokenizer(), QwenModelAdapter(),
+        tokenizer_digest="tok", template_digest="tpl",
+    )
     converted = convert(payload(), model="policy")
     serving = {"input_ids": backend.prepare(converted)}
     output = {"text": "done", "meta_info": {"weight_version": "1", "output_token_logprobs": [[-.2, 13]],
@@ -293,7 +324,31 @@ def test_sglang_weight_version_is_explicit():
             assert timeout == 30
             return Response()
 
-    backend = SGLangBackend("http://engine", SimpleNamespace(), tokenizer_digest="tok",
-                            template_digest="tpl", timeout=30)
+    from harborrl.models.qwen import QwenModelAdapter
+    backend = SGLangBackend(
+        "http://engine", SimpleNamespace(), QwenModelAdapter(),
+        tokenizer_digest="tok", template_digest="tpl", timeout=30,
+    )
     backend.opener = Opener()
     assert backend.weight_version() == "7"
+
+
+def test_native_gateway_thread_does_not_own_asyncio_default_executor():
+    from harborrl.rollout.native_generate import NativeRolloutRuntime
+
+    started, stopped = threading.Event(), threading.Event()
+
+    class Server:
+        def serve_forever(self):
+            started.set()
+            stopped.wait(5)
+
+    runtime = object.__new__(NativeRolloutRuntime)
+    runtime.server = Server()
+    runtime._start_gateway()
+    try:
+        assert started.wait(1)
+        assert runtime.thread.daemon is True
+    finally:
+        stopped.set()
+        runtime.thread.join(1)

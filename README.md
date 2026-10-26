@@ -40,6 +40,16 @@ HarborRL supports flexible combinations of **Models × Algorithms × Tasks × Ha
 
 ## AI-assisted Configure
 
+[Math training pipeline](docs/math-distill.md). It includes explicit synthetic
+fixtures for testing real optimizer updates and checkpoint restore.
+
+answer-file setup, see the [configuration CLI guide](docs/configuration-wizard.md).
+Start with `harborrl options` or `harborrl init --help`.
+
+Run `harborrl web` to open the local browser console for configuration, validation,
+dry-runs, training launch, and logs. See the [web console guide](docs/web-console.md)
+for remote-controller access and lifecycle details.
+
 If you want an AI agent to help deploy this repository and verify training,
 ask it to first read and strictly follow
 [docs/agents/environment-check.md](docs/agents/environment-check.md).
@@ -77,6 +87,12 @@ Confirm the result yourself against this checklist:
 5. The agent waits for explicit consent before starting real training.
 
 ## Quick Start
+
+The default CPU install does not need a Sandbox SDK or cluster account.
+For controller placement, see [deployment](docs/deployment.md). For optional
+standard OpenSandbox execution, see [Sandbox rollout](docs/sandbox-rollout.md).
+The independently installed [H-cluster practice](practices/h_cluster/README.md)
+contains Brainbox-specific deployment and restricted-network relay examples.
 
 ### Install
 
@@ -128,7 +144,7 @@ The command style is a shorthand over `config.yaml` in the working directory (or
 
 ## Task Configuration
 
-Training is configured with one YAML file that has a fixed section and field set. Relative paths resolve against the YAML file, and repeated `--set section.field=value` overrides are parsed as YAML values and validated again. Start site-specific configurations from [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml).
+Training is configured with one YAML file that has a fixed section and field set. Relative paths resolve against the YAML file, and repeated `--set section.field=value` overrides are parsed as YAML values and validated again. Start site-specific configurations from [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml). Optional [train/inference consistency checks](docs/train-inference-consistency.md) compare frozen rollout scores with the pre-update trainer and probe synchronized inference engines.
 
 The configuration has three broad parts: `execution` is fixed to `harbor_job`; `harbor`, `gateway`, and `deployment` describe rollout workers, service endpoints, and GPU topology; `tasks`, `harness`, `model`, `training`, `sampling`, and `output` describe the experiment and its outputs.
 

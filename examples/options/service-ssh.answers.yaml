@@ -1,0 +1,44 @@
+# All paths refer to the named role's machine. Replace before use.
+answers_version: 1
+preset: service-ssh
+training:
+  tasks:
+    catalog: /srv/shared/inputs/tasks.jsonl
+  harness:
+    profile: /srv/shared/inputs/claude-code.json
+  model:
+    checkpoint: /srv/models/qwen
+    reference: /srv/models/qwen-reference
+    args_file: qwen3-8B
+  gateway:
+    tokenizer_digest: REPLACE_WITH_ACTUAL_TOKENIZER_SHA256
+    template_digest: REPLACE_WITH_ACTUAL_TEMPLATE_SHA256
+  deployment:
+    layout: split
+    num_gpus: 8
+    actor_gpus: 4
+    rollout_gpus: 4
+    actor_tensor_parallel_size: 4
+    rollout_gpus_per_engine: 4
+deployment:
+  manager:
+    source_dir: /srv/shared/harborrl
+    controller_python: /opt/controller/bin/python
+    control_url: http://controller.example:49200
+    gateway_url: http://controller.example:49184
+  gpu_target:
+    ssh:
+      host: gpu-training
+    source_dir: /srv/shared/harborrl
+    train_python: /opt/training/bin/python
+  storage:
+    run_root: /srv/shared/runs
+  rollout:
+    workers:
+      - id: runner-0
+        ssh:
+          host: rollout-worker
+        source_dir: /srv/shared/harborrl
+        runner_python: /opt/harbor/bin/python
+        docker: true
+        task_roots: [/srv/shared/tasks]

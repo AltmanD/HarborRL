@@ -142,8 +142,19 @@ def test_cli_command_mode_selects_experiment_dimensions(tmp_path, capsys, monkey
     assert positional_plan["config"]["schema_version"] == 2
 
 
-def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path):
-    native_config(tmp_path)
+@pytest.mark.parametrize('overrides, expected_lr', [
+    ([], '0.0001'),
+    (['training.learning_rate=0.000025'], '2.5e-05'),
+])
+def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expected_lr):
+    config_path, task = native_config(tmp_path)
+    from harborrl.data.harbor.native_inspector import inspect_native
+    config = load_config(config_path, overrides)
+    catalog_path = Path(config['tasks']['catalog'])
+    entries = json.loads(catalog_path.read_text())
+    entries[0]['task_digest'] = inspect_native(task)['task_digest']
+    catalog_path.write_text(json.dumps(entries))
+    plan = launch_plan(config)
     prompt = tmp_path / "native.jsonl"
     prompt.write_text('{"task":"fixture","metadata":{"harborrl_native":true}}\n')
     root = tmp_path / "run"
@@ -154,6 +165,7 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path):
     (model_args / "qwen3-8B.sh").write_text("MODEL_ARGS=(--hidden-size 4096)\n")
     env = {key: value for key, value in os.environ.items()
            if key in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR"}}
+    env.update(plan["environment"])
     env.update({
         "DRY_RUN": "1", "DATASET": "native", "ALGO": "grpo",
         "HARNESS_OPTION": "native-claude-code", "HARBORRL_NATIVE_ROLLOUT": "1",
@@ -162,14 +174,16 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path):
         "MODEL_TAG": "qwen3-8B", "NUM_GPUS": "8", "ACTOR_GPUS": "4",
         "ROLLOUT_GPUS": "4", "TP_SIZE": "4", "ROLLOUT_NUM_GPUS_PER_ENGINE": "4",
         "HARBORRL_GPU_LAYOUT": "split", "NUM_ROLLOUT": "1", "SAVE_INTERVAL": "1",
-        "ROLLOUT_BATCH_SIZE": "1", "N_SAMPLES": "2", "RUN_DIR": str(root), "RUN_ID": "run",
+        "RUN_DIR": str(root), "RUN_ID": "run",
         "RUNS_ROOT": str(tmp_path), "CKPT_ROOT": str(root / "checkpoints"),
         "HARBORRL_NATIVE_MAX_ATTEMPTS": "2", "HARBORRL_NATIVE_DRAIN_TIMEOUT": "1",
         "HARBORRL_NATIVE_RUNNER_WORKERS": '["worker-a", "worker-b"]',
         "HARBORRL_NATIVE_GATEWAY_HOST": "0.0.0.0",
         "HARBORRL_NATIVE_SLIME_CONTRACT": "slime-v032",
         "SLIME_DIR": str(slime),
+        "TRAIN_PYTHON": sys.executable,
     })
+    env['LR'] = plan['environment']['LR']
     script = Path(__file__).resolve().parents[2] / "harborrl/platform/slime_train.sh"
     output = tmp_path / "shell.log"
     with output.open("w") as stream:
@@ -179,6 +193,24 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path):
     assert result.returncode == 0, result.stdout
     command = next(line for line in result.stdout.splitlines() if line.startswith("[dry-run] "))
     assert "--loss-type custom_loss" in command
+    import shlex
+    arguments = shlex.split(command.removeprefix('[dry-run] '))
+    assert arguments[arguments.index('--lr') + 1] == expected_lr
+    expected_flags = {
+        '--num-rollout': '1', '--save-interval': '1',
+        '--rollout-batch-size': '1', '--n-samples-per-prompt': '2',
+        '--rollout-max-response-len': '128', '--rollout-max-context-len': '1024',
+        '--num-gpus-per-node': '8', '--actor-num-gpus-per-node': '4',
+        '--rollout-num-gpus': '4', '--tensor-model-parallel-size': '4',
+        '--rollout-num-gpus-per-engine': '4', '--hf-checkpoint': '/model',
+        '--ref-load': '/reference', '--prompt-data': str(prompt),
+        '--save': str(root / 'checkpoints' / 'run'),
+    }
+    for flag, value in expected_flags.items():
+        assert arguments[arguments.index(flag) + 1] == value
+    recorded = json.loads(next((root / 'dry-run-commands').glob('*.json')).read_text())
+    assert recorded['command'] == arguments
+    assert recorded['mode'] == 'dry_run'
     for argument in (
         "--rollout-function-path harborrl.backends.slime_v032.rollout.generate_rollout",
         "--custom-convert-samples-to-train-data-path harborrl.backends.slime_v032.converter.convert_samples_to_train_data",
@@ -208,96 +240,57 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path):
     assert "--no-load-optim" in command
 
 
-def test_native_runtime_binds_gateway_with_registry_and_backend(tmp_path, monkeypatch):
-    from harborrl.gateway import server as gateway_server
-    from harborrl.gateway import sglang_backend, trace
-    from harborrl.rollout import native_generate
+def test_slime_runtime_config_maps_args_and_environment(tmp_path, monkeypatch):
+    from harborrl.backends.slime_v032 import rollout as slime_rollout
+    from harborrl.rollout.runtime import RolloutRuntimeConfig
 
     catalog = tmp_path / "catalog.json"
     catalog.write_text("[]")
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps({"model": "policy"}))
-    tokenizer = SimpleNamespace(
-        apply_chat_template=lambda *args, **kwargs: [1, 2],
-        get_vocab=lambda: {"token": 1},
-    )
-    tokenizer_digest, template_digest = native_generate.tokenizer_fingerprint(tokenizer)
     environment = {
-        "RUN_DIR": str(tmp_path), "HARBORRL_NATIVE_CATALOG": str(catalog),
+        "RUN_ID": "run-1", "RUN_DIR": str(tmp_path),
+        "HARBORRL_NATIVE_CATALOG": str(catalog),
         "HARBORRL_NATIVE_PROFILE": str(profile),
-        "HARBORRL_NATIVE_TOKENIZER_DIGEST": tokenizer_digest,
-        "HARBORRL_NATIVE_TEMPLATE_DIGEST": template_digest,
         "HARBORRL_NATIVE_GATEWAY_HOST": "127.0.0.1",
         "HARBORRL_NATIVE_GATEWAY_PORT": "49183",
+        "HARBORRL_NATIVE_GATEWAY_URL": "http://gateway:49183",
+        "HARBORRL_NATIVE_RUNNER_PYTHON": "/runner/python",
+        "HARBORRL_NATIVE_RUNNER_WORKERS": '["worker-a", "worker-b"]',
+        "HARBORRL_NATIVE_TOKENIZER_DIGEST": "0" * 64,
+        "HARBORRL_NATIVE_TEMPLATE_DIGEST": "1" * 64,
+        "ROLLOUT_MAX_RESPONSE_LEN": "128", "ROLLOUT_MAX_CONTEXT_LEN": "1024",
     }
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
+    args = SimpleNamespace(rollout_num_gpus=8, rollout_num_gpus_per_engine=4,
+                           sglang_server_concurrency=2, hf_checkpoint="/model",
+                           sglang_router_ip="127.0.0.1", sglang_router_port=30000,
+                           rollout_max_context_len=1024, rollout_max_response_len=128,
+                           n_samples_per_prompt=4)
+    config = slime_rollout.runtime_config_from_args(args)
+    assert isinstance(config, RolloutRuntimeConfig)
+    assert config.endpoint == "http://127.0.0.1:30000"
+    assert config.concurrency_limit == 4  # 2 concurrency x 2 engines
+    assert config.group_size == 4
+    assert config.workers == ("worker-a", "worker-b")
+    assert config.max_output_tokens == 128
 
-    calls = {}
-
-    class FakeGateway:
-        def __init__(self, registry, backend, *, model, max_output_tokens):
-            calls["gateway"] = (registry, backend, model, max_output_tokens)
-            calls["gateway_object"] = self
-
-    class FakeServer:
-        def serve_forever(self):
-            pass
-
-        def shutdown(self):
-            pass
-
-        def server_close(self):
-            pass
-
-    class FakeTraceRegistry:
-        def __init__(self, path):
-            calls["registry_path"] = path
-
-    class FakeBackend:
-        def __init__(self, *args, **kwargs):
-            calls["backend_args"] = (args, kwargs)
-
-        def weight_version(self):
-            return "7"
-
-    def fake_make_server(gateway, host, port):
-        calls["server"] = (gateway, host, port)
-        return FakeServer()
-
+    # The tokenizer loader keeps the single Slime dependency at the boundary.
     slime = ModuleType("slime")
     utils = ModuleType("slime.utils")
     processing = ModuleType("slime.utils.processing_utils")
+    tokenizer = SimpleNamespace()
     processing.load_tokenizer = lambda *args, **kwargs: tokenizer
     slime.utils = utils
     utils.processing_utils = processing
     monkeypatch.setitem(sys.modules, "slime", slime)
     monkeypatch.setitem(sys.modules, "slime.utils", utils)
     monkeypatch.setitem(sys.modules, "slime.utils.processing_utils", processing)
-    monkeypatch.setattr(gateway_server, "Gateway", FakeGateway)
-    monkeypatch.setattr(gateway_server, "make_server", fake_make_server)
-    monkeypatch.setattr(sglang_backend, "SGLangBackend", FakeBackend)
-    monkeypatch.setattr(trace, "TraceRegistry", FakeTraceRegistry)
-    monkeypatch.setattr(native_generate, "_RUNTIME", None)
-
-    args = SimpleNamespace(rollout_num_gpus=4, rollout_num_gpus_per_engine=4,
-                           sglang_server_concurrency=1, hf_checkpoint="/model",
-                           sglang_router_ip="127.0.0.1", sglang_router_port=30000,
-                           rollout_max_context_len=1024, rollout_max_response_len=128)
-    runtime = asyncio.run(native_generate.runtime(args))
-    try:
-        registry = calls["gateway"][0]
-        backend = calls["gateway"][1]
-        assert calls["gateway"] == (registry, backend, "policy", 128)
-        assert calls["server"][0] is calls["gateway_object"]
-        assert calls["server"][1:] == ("127.0.0.1", 49183)
-        assert runtime.backend.weight_version() == "7"
-    finally:
-        runtime.close()
-        native_generate._RUNTIME = None
+    assert slime_rollout.slime_tokenizer_loader(args)() is tokenizer
 
 def test_native_policy_identity_uses_synchronized_pool_version(tmp_path, monkeypatch):
-    from harborrl.rollout import native_generate
+    from harborrl.rollout import runtime as rollout_runtime
 
     class Backend:
         endpoint = "http://router:30000"
@@ -314,26 +307,37 @@ def test_native_policy_identity_uses_synchronized_pool_version(tmp_path, monkeyp
 
     monkeypatch.setenv("RUN_DIR", str(tmp_path))
     registry = Registry()
-    runtime = SimpleNamespace(run_root=tmp_path, backend=Backend(), registry=registry)
-    assert native_generate.current_policy_version(runtime) == "2"
+    runtime = SimpleNamespace(run_root=tmp_path, backend=Backend(), registry=registry,
+                              config=SimpleNamespace(drain_timeout=30))
+    assert rollout_runtime.current_policy_version(runtime) == "2"
     payload = json.loads((tmp_path / "policy-pool.json").read_text())
     assert payload["weight_version"] == "2"
     assert registry.published[1] == "2"
+    assert registry.timeout == 30
 
 
 def test_native_slots_spread_workers_and_shift_retries(tmp_path, monkeypatch):
-    from harborrl.rollout import native_generate
+    from harborrl.rollout import runtime as rollout_runtime
 
     entry = {"id": "task", "revision": "1", "path": "/task", "task_digest": "d" * 64,
              "reward_profile": {"key": "reward", "scale": 1.0, "offset": 0.0, "raw_range": [0.0, 1.0]}}
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps({"model": "policy"}))
-    monkeypatch.setenv("RUN_ID", "run")
-    monkeypatch.setenv("HARBORRL_NATIVE_PROFILE", str(profile))
-    monkeypatch.setenv("HARBORRL_NATIVE_RUNNER_WORKERS", json.dumps(["worker-a", "worker-b"]))
-    monkeypatch.setenv("HARBORRL_NATIVE_MAX_ATTEMPTS", "2")
-    monkeypatch.setenv("HARBORRL_NATIVE_GATEWAY_URL", "http://gateway:32123")
-    monkeypatch.setenv("HARBORRL_NATIVE_RUNNER_PYTHON", "/python")
+    environment = {
+        "RUN_ID": "run", "RUN_DIR": str(tmp_path), "HARBORRL_NATIVE_PROFILE": str(profile),
+        "HARBORRL_NATIVE_RUNNER_WORKERS": json.dumps(["worker-a", "worker-b"]),
+        "HARBORRL_NATIVE_MAX_ATTEMPTS": "2",
+        "HARBORRL_NATIVE_GATEWAY_URL": "http://gateway:32123",
+        "HARBORRL_NATIVE_GATEWAY_PORT": "32123",
+        "HARBORRL_NATIVE_RUNNER_PYTHON": "/python",
+        "HARBORRL_NATIVE_CATALOG": str(tmp_path / "catalog.json"),
+        "HARBORRL_NATIVE_TOKENIZER_DIGEST": "0" * 64,
+        "HARBORRL_NATIVE_TEMPLATE_DIGEST": "1" * 64,
+    }
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    config = rollout_runtime.RolloutRuntimeConfig.from_environment(
+        environment, endpoint="http://router:30000", concurrency_limit=8, group_size=4)
 
     class FakeSlots:
         max_attempts = 2
@@ -360,19 +364,15 @@ def test_native_slots_spread_workers_and_shift_retries(tmp_path, monkeypatch):
             raise RuntimeError("simulated first-attempt failure")
         return {"identity": identity.__dict__}
 
-    monkeypatch.setattr(native_generate, "GroupSlots", fake_group_slots)
-    monkeypatch.setattr(native_generate, "run_attempt", fake_run_attempt)
+    monkeypatch.setattr(rollout_runtime, "GroupSlots", fake_group_slots)
+    monkeypatch.setattr(rollout_runtime, "run_attempt", fake_run_attempt)
 
-    args = SimpleNamespace(n_samples_per_prompt=4, rollout_max_response_len=64)
     runtime_ = SimpleNamespace(rollout_root=tmp_path, semaphore=asyncio.Semaphore(8),
                                registry=SimpleNamespace(), profile={"model": "policy"})
-    sample = SimpleNamespace(metadata={"native_task": entry}, group_index=0)
 
     async def gather_slots():
         return await asyncio.gather(*[
-            native_generate._run_slot(
-                args, runtime_, sample, slot, 0, entry, "sampling", "1"
-            )
+            rollout_runtime.run_slot(config, runtime_, 0, slot, 0, entry, "sampling", "1")
             for slot in range(4)])
 
     results = asyncio.run(gather_slots())
@@ -413,13 +413,96 @@ def test_native_dispatch_passes_materialized_prompt_data(tmp_path, monkeypatch):
     monkeypatch.setenv("SLIME_DIR", "/opt/slime-v0.3.2")
     monkeypatch.setenv("MEGATRON_DIR", "/opt/megatron")
     monkeypatch.setenv("SGLANG_IMAGE", "sglang:v0.5.15.post1-cu129")
+    monkeypatch.setenv("LR", "99")
+    monkeypatch.setenv("N_SAMPLES", "99")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-provider-credential")
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:credential@proxy.example:8080")
     monkeypatch.setattr(native_train, "doctor", lambda *_args, **_kwargs: [])
     assert native_train.dispatch(plan) == 0
     launch_path = next((tmp_path / "runs" / "training").glob("*/launch.json"))
     launch = json.loads(launch_path.read_text())
     assert launch["prompt_data"] == output.read_text()
+    effective_text = (launch_path.parent / "effective-config.json").read_text()
+    effective = json.loads(effective_text)
+    assert effective['environment']['LR'] == '0.0001'
+    assert effective['environment']['N_SAMPLES'] == '2'
+    assert effective['environment']['ROLLOUT_PROMPT_DATA'] == output.read_text()
+    assert effective['components']['algorithm'] == 'grpo'
+    assert effective['deployment_environment']['SLIME_DIR'] == '/opt/slime-v0.3.2'
+    assert 'ambient-provider-credential' not in effective_text
+    assert 'user:credential' not in effective_text
     assert path_output.read_text().split(os.pathsep, 1)[0] == str(Path(plan["command"][0]).parent)
     assert json.loads(workers_output.read_text()) == ["worker-a", "worker-b"]
     assert gateway_output.read_text() == "gateway"
     assert backend_output.read_text() == (
         "/opt/slime-v0.3.2:/opt/megatron:sglang:v0.5.15.post1-cu129")
+
+
+def test_all_schema_fields_have_declared_consumers():
+    from harborrl.backends.slime_v032.config import field_usage
+    from harborrl.config.native import FIELDS
+    assert set(field_usage()) == {
+        f'{section}.{field}' for section, fields in FIELDS.items() for field in fields
+    }
+
+
+def test_schema_validation_does_not_read_harness_files(tmp_path):
+    from harborrl.config.native import validate, validate_files
+    config_path, _ = native_config(tmp_path)
+    config = load_config(config_path)
+    Path(config['harness']['profile']).unlink()
+    assert validate(config, config_path) is config
+    with pytest.raises(FileNotFoundError):
+        validate_files(config)
+
+
+@pytest.mark.parametrize('field, value, message', [
+    ('training', None, 'training'),
+    ('training.backend_contract', [], 'backend_contract'),
+    ('gateway.advertised_url', [], 'gateway.advertised_url'),
+    ('sampling.max_tokens', 'many', 'sampling.max_tokens'),
+])
+def test_invalid_config_types_are_cli_errors(tmp_path, capsys, field, value, message):
+    import yaml
+
+    from harborrl.cli import main
+    config_path, _ = native_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text())
+    section, _, key = field.partition('.')
+    if key:
+        config[section][key] = value
+    else:
+        config[section] = value
+    config_path.write_text(yaml.safe_dump(config))
+    with pytest.raises(SystemExit) as exc:
+        main(['train', str(config_path), '--dry-run'])
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_invalid_override_yaml_is_cli_error(tmp_path, capsys):
+    from harborrl.cli import main
+    config_path, _ = native_config(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        main(['train', str(config_path), '--set', 'training.learning_rate=[', '--dry-run'])
+    assert exc.value.code == 2
+    assert 'training.learning_rate: invalid YAML override' in capsys.readouterr().err
+
+
+def test_harness_file_override_is_checked_after_override(tmp_path):
+    config_path, _ = native_config(tmp_path)
+    config = load_config(config_path)
+    old_profile = Path(config['harness']['profile'])
+    new_profile = tmp_path / 'replacement.json'
+    old_profile.rename(new_profile)
+    config = load_config(config_path, [f'harness.profile={new_profile}'])
+    assert config['harness']['profile'] == str(new_profile)
+
+
+def test_catalog_rejects_nonmapping_entry(tmp_path):
+    from harborrl.tasks.catalog import catalog
+    config_path, _ = native_config(tmp_path)
+    config = load_config(config_path)
+    Path(config['tasks']['catalog']).write_text('[null]')
+    with pytest.raises(ValueError, match='catalog identity'):
+        catalog(config)
