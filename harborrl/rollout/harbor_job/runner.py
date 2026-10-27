@@ -14,10 +14,8 @@ import signal
 import sys
 from pathlib import Path
 
-from harborrl.data.harbor.native_inspector import inspect_native
+from harborrl.math_registry import CLAUDE_CODE_HARNESS, NATIVE_TASK_PROVIDER
 from harborrl.trajectories.native import Identity, digest, publish
-
-from .bindings import claude_config
 
 
 def probe():
@@ -43,7 +41,9 @@ async def execute(request, emit, read_command):
     identity = Identity(**request["identity"])
     if digest(request["profile"]) != identity.harness_digest:
         raise ValueError("harness profile differs from attempt manifest")
-    inspection = inspect_native(request["task_path"], expected_digest=identity.task_digest)
+    inspection = NATIVE_TASK_PROVIDER.adapter.inspect(
+        request["task_path"], expected_digest=identity.task_digest
+    )
     if inspection["status"] != "NEEDS_PROBE":
         raise ValueError("native task preflight failed: " + ",".join(inspection["reasons"]))
     root = Path(request["output"]).resolve()
@@ -51,12 +51,36 @@ async def execute(request, emit, read_command):
     root.mkdir(parents=True, exist_ok=False)
     publish(root / "manifest.json", {"identity": identity.to_dict(), "task": inspection,
                                      "profile": request["profile"], "gateway_url": request["gateway_url"]})
+    sandbox = request.get('sandbox')
+    agent_gateway = request['gateway_url']
+    if sandbox is not None:
+        from harborrl.rollout.harbor_job.sandbox_config import environment_class
+        agent_gateway = environment_class(sandbox).agent_gateway(sandbox, agent_gateway)
+    agent = CLAUDE_CODE_HARNESS.adapter.agent_config(
+        request['profile'], agent_gateway, request['credential'], request['max_output_tokens'])
+    environment = {'type': 'docker', 'delete': True}
+    if sandbox is not None:
+        from harborrl.rollout.harbor_job.sandbox_config import task_binding
+        if digest(sandbox) != request.get('runtime_digest'):
+            raise ValueError('sandbox runtime lock mismatch')
+        if sandbox['installation'] and sandbox['installation']['version'] != request['profile']['cli_version']:
+            raise ValueError('offline harness version mismatch')
+        publish(root / 'runtime.json', {'config': sandbox, 'digest': digest(sandbox)})
+        environment = {'type': 'opensandbox', 'delete': True,
+                       'import_path': sandbox['adapter'],
+                       'kwargs': {'sandbox_config': sandbox, 'binding': task_binding(sandbox, request['task_path']),
+                                  'evidence_dir': str(root),
+                                  'gateway_url': request['gateway_url'],
+                                  'startup_dir': str(root.parents[2] / '.sandbox-startup')}}
+        if sandbox['installation']:
+            agent.pop('name')
+            agent['import_path'] = 'harborrl.harnesses.offline_claude:OfflineClaudeCode'
+            agent['kwargs']['installation'] = sandbox['installation']
     config = TrialConfig.model_validate({
         "task": {"path": inspection["path"]},
         "trial_name": digest(identity.to_dict()), "trials_dir": str(root / "harbor"),
-        "agent": claude_config(request["profile"], request["gateway_url"], request["credential"],
-                               request["max_output_tokens"]),
-        "environment": {"type": "docker", "delete": True},
+        "agent": agent,
+        "environment": environment,
         "verifier": {"disable": False, "override_timeout_sec": request["profile"]["verifier_timeout_sec"]}})
     trial = await Trial.create(config)
     trial_id = str(trial.id)

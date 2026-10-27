@@ -2,9 +2,9 @@
   <img src="assets/HarborRL-title.jpg" alt="HarborRL" width=800>
 </p>
 
-<!-- <p align="center">
+<p align="center">
   <h1>HarborRL</h1>
-</p> -->
+</p>
 
 <p align="center">
   <strong>A lightweight agentic reinforcement learning framework for everyone</strong>
@@ -25,6 +25,8 @@
 
 ## News
 
+- **2026-10-26** Added an [offline configuration wizard](docs/configuration-wizard.md) and a [local Web console](docs/web-console.md) for configuration, validation, dry-runs, training launch, and logs.
+- **2026-10-26** Added [controller/GPU deployment configuration](docs/deployment.md), optional [OpenSandbox execution](docs/sandbox-rollout.md), and opt-in [train/inference consistency checks](docs/train-inference-consistency.md).
 - **10/2026** 📣📣📣 HarborRL released
 
 ## About
@@ -39,6 +41,14 @@ HarborRL supports flexible combinations of **Models × Algorithms × Tasks × Ha
 - **Harnesses:** RL training with **40+** harness frameworks, including Claude Code, Codex, LangGraph, SWE-agent, and more.
 
 ## AI-assisted Configure
+
+For the offline options catalog, interactive configuration, and answer-file setup,
+see the [configuration CLI guide](docs/configuration-wizard.md).
+Start with `harborrl options` or `harborrl init --help`.
+
+Run `harborrl web` to open the local browser console for configuration, validation,
+dry-runs, training launch, and logs. See the [web console guide](docs/web-console.md)
+for remote-controller access and lifecycle details.
 
 If you want an AI agent to help deploy this repository and verify training,
 ask it to first read and strictly follow
@@ -77,6 +87,12 @@ Confirm the result yourself against this checklist:
 5. The agent waits for explicit consent before starting real training.
 
 ## Quick Start
+
+The default CPU install does not need a Sandbox SDK or cluster account.
+For controller placement, see [deployment](docs/deployment.md). For optional
+standard OpenSandbox execution, see [Sandbox rollout](docs/sandbox-rollout.md).
+The independently installed [H-cluster practice](practices/h_cluster/README.md)
+contains Brainbox-specific deployment and restricted-network relay examples.
 
 ### Install
 
@@ -128,7 +144,7 @@ The command style is a shorthand over `config.yaml` in the working directory (or
 
 ## Task Configuration
 
-Training is configured with one YAML file that has a fixed section and field set. Relative paths resolve against the YAML file, and repeated `--set section.field=value` overrides are parsed as YAML values and validated again. Start site-specific configurations from [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml).
+Training is configured with one YAML file that has a fixed section and field set. Relative paths resolve against the YAML file, and repeated `--set section.field=value` overrides are parsed as YAML values and validated again. Start site-specific configurations from [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml). Optional [train/inference consistency checks](docs/train-inference-consistency.md) compare frozen rollout scores with the pre-update trainer and probe synchronized inference engines.
 
 The configuration has three broad parts: `execution` is fixed to `harbor_job`; `harbor`, `gateway`, and `deployment` describe rollout workers, service endpoints, and GPU topology; `tasks`, `harness`, `model`, `training`, `sampling`, and `output` describe the experiment and its outputs.
 

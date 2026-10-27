@@ -1,3 +1,4 @@
+"""Legacy TerminalEnv compatibility CLI; use harborrl hub inspect for native tasks."""
 import argparse
 import json
 from pathlib import Path

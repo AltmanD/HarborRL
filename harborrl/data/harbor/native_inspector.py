@@ -1,7 +1,7 @@
 """Native preflight: task metadata, not TerminalEnv materialization rules."""
 from pathlib import Path
 
-from .inspector import tomllib, tree_digest
+from harborrl.tasks.content import tomllib, tree_digest
 
 
 def inspect_native(path, *, expected_digest=None):
@@ -14,7 +14,7 @@ def inspect_native(path, *, expected_digest=None):
         if expected_digest is not None and checksum != expected_digest:
             raise ValueError("task content changed since catalog lock")
         spec = tomllib.loads((root / "task.toml").read_text())
-        for name in ("instruction.md", "environment/Dockerfile", "tests/test.sh"):
+        for name in ("instruction.md", "tests/test.sh"):
             if not (root / name).is_file():
                 raise ValueError("missing " + name)
         if not (root / "instruction.md").read_text().strip():
@@ -22,6 +22,8 @@ def inspect_native(path, *, expected_digest=None):
         env, verifier = spec.get("environment", {}), spec.get("verifier", {})
         if not isinstance(env, dict) or not isinstance(verifier, dict):
             raise TypeError("invalid environment/verifier configuration")
+        if not (root / 'environment/Dockerfile').is_file() and not env.get('docker_image'):
+            raise ValueError('missing environment/Dockerfile or prebuilt docker_image')
         if not isinstance(spec.get("agent", {}), dict):
             raise TypeError("invalid agent configuration")
         if spec.get("user_agent") or spec.get("bridge"):

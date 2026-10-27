@@ -1,0 +1,23 @@
+adapter: harborrl_h_cluster.environment:BrainboxEnvironment
+domain: https://sandbox.example/brainbox
+credential_file: /run/secrets/harborrl/sandbox-key
+max_live_instances: 8
+startup_concurrency: 1
+request_timeout_s: 180
+create_timeout_s: 600
+options:
+  project: REPLACE_PROJECT
+  gateway_transport: platform_pull
+  relay_port: 49185
+  relay_timeout_s: 180
+bindings:
+  - image: registry.example/project/task:locked-version
+    max_live_instances: 1
+    options:
+      environment_id: REPLACE_ENVIRONMENT_ID
+      required_mount_paths: []
+installation:
+  mode: offline_binary
+  version: 2.1.141
+  binary: /opt/harborrl/assets/claude
+  sha256: '0000000000000000000000000000000000000000000000000000000000000000'

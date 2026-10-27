@@ -9,24 +9,23 @@ from urllib import request
 
 from harborrl.trajectories.native import digest, finite
 
-from .messages import ProtocolError, parse_qwen_output
+from .messages import ProtocolError
 
 
 class SGLangBackend:
-    def __init__(self, endpoint, tokenizer, *, tokenizer_digest, template_digest,
-                 timeout=120, max_context=32768, audited_raw_logprobs=False):
+    def __init__(self, endpoint, tokenizer, model_adapter, *, tokenizer_digest,
+                 template_digest, timeout=120, max_context=32768,
+                 audited_raw_logprobs=False):
         self.endpoint = endpoint.rstrip("/")
         self.tokenizer = tokenizer
+        self.model_adapter = model_adapter
         self.tokenizer_digest, self.template_digest = tokenizer_digest, template_digest
         self.timeout, self.max_context = timeout, max_context
         self.audited_raw_logprobs = audited_raw_logprobs
         self.opener = request.build_opener(request.ProxyHandler({}))
 
     def prepare(self, converted):
-        ids = self.tokenizer.apply_chat_template(converted["messages"], tools=converted["tools"] or None,
-                                                tokenize=True, add_generation_prompt=True, enable_thinking=False)
-        if not isinstance(ids, list) or not ids or any(type(i) is not int or i < 0 for i in ids):
-            raise ProtocolError("tokenizer did not produce actual input IDs")
+        ids = self.model_adapter.render_chat(self.tokenizer, converted)
         if len(ids) + converted["sampling"]["max_new_tokens"] > self.max_context:
             raise ProtocolError("context budget exceeded; implicit truncation is forbidden")
         return ids
@@ -97,7 +96,9 @@ class SGLangBackend:
         finish = meta.get("finish_reason", {})
         if finish.get("type") not in ("stop", "length"):
             raise ValueError("unsupported serving finish reason")
-        blocks = parse_qwen_output(text, response_id=response_id, tools=converted["tools"])
+        blocks = self.model_adapter.parse_output(
+            text, response_id=response_id, tools=converted["tools"]
+        )
         has_tools = any(b["type"] == "tool_use" for b in blocks)
         stop_sequence = finish.get("matched") if isinstance(finish.get("matched"), str) else None
         if stop_sequence not in converted["sampling"]["stop"]:

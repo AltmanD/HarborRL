@@ -5,8 +5,9 @@ from urllib.parse import urlsplit
 
 def claude_config(profile, gateway_url, credential, max_output_tokens=8192):
     required = {"cli_version", "model", "max_turns", "agent_timeout_sec", "setup_timeout_sec", "verifier_timeout_sec"}
-    if set(profile) != required:
-        raise ValueError(f"Claude profile requires exactly {sorted(required)}")
+    allowed = required | {"disallowed_tools"}
+    if not required.issubset(profile) or set(profile) - allowed:
+        raise ValueError(f"Claude profile requires {sorted(required)} and optionally disallowed_tools")
     if not isinstance(profile["cli_version"], str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?", profile["cli_version"]):
         raise ValueError("exact Claude CLI version required; latest is forbidden")
     if not isinstance(profile["model"], str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]+", profile["model"]):
@@ -14,6 +15,10 @@ def claude_config(profile, gateway_url, credential, max_output_tokens=8192):
     for key in required - {"model", "cli_version"}:
         if type(profile[key]) is not int or profile[key] <= 0:
             raise ValueError(f"positive integer required: {key}")
+    disallowed_tools = profile.get("disallowed_tools", "Agent,Task")
+    if not isinstance(disallowed_tools, str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_]*(?:,[A-Za-z][A-Za-z0-9_]*)*", disallowed_tools):
+        raise ValueError("disallowed tools must be a comma-separated identifier list")
     url = urlsplit(gateway_url)
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment or url.path not in ("", "/"):
         raise ValueError("Anthropic base URL must be a plain origin (no /v1 suffix)")
@@ -27,9 +32,10 @@ def claude_config(profile, gateway_url, credential, max_output_tokens=8192):
             "override_timeout_sec": profile["agent_timeout_sec"],
             "override_setup_timeout_sec": profile["setup_timeout_sec"],
             "kwargs": {"version": profile["cli_version"], "max_turns": profile["max_turns"],
-                       "max_thinking_tokens": 0, "disallowed_tools": "Agent,Task",
+                       "max_thinking_tokens": 0, "disallowed_tools": disallowed_tools,
                        "permission_mode": "bypassPermissions"},
             "env": {**client_controls(), "ANTHROPIC_API_KEY": credential,
+                    "ANTHROPIC_MODEL": profile["model"],
                     "ANTHROPIC_BASE_URL": gateway_url.rstrip("/"),
                     "NO_PROXY": url.hostname, "no_proxy": url.hostname,
                     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(max_output_tokens)}}

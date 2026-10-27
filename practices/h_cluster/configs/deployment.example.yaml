@@ -1,0 +1,37 @@
+# Replace example hosts and paths; no site-specific addresses are required.
+schema_version: 1
+manager:
+  id: manager
+  mode: service
+  bind: 0.0.0.0
+  control_port: 49200
+  control_url: http://manager.example:49200
+  gateway_port: 49184
+  gateway_url: http://manager.example:49184
+  run_token_file: /srv/harborrl/site/run-token
+  source_dir: /srv/harborrl/repo
+  controller_python: /opt/harborrl/controller/bin/python
+gpu_target:
+  id: trainer
+  transport: ssh
+  ssh: {host: training-host}
+  source_dir: /srv/harborrl/repo
+  train_python: /opt/harborrl/training/bin/python
+  environment_file: /srv/harborrl/site/gpu-env.json
+  expected_gpus: 8
+storage:
+  mode: shared_fs
+  run_root: /srv/harborrl/runs
+  manager_writable: true
+  gpu_writable: true
+  worker_writable: true
+rollout:
+  provider: sandbox
+  workers: []
+connectivity:
+  command_timeout_s: 30
+  ssh_timeout_s: 15
+  http_timeout_s: 10
+  gpu_to_controller: true
+  worker_to_gateway: false
+  manager_to_gpu_inference: true

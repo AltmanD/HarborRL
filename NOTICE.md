@@ -2,6 +2,10 @@
 
 HarborRL is MIT-licensed by Princeton-AI.
 
+The local web console bundles Lucide 1.61.0 (ISC license). Its unmodified browser
+distribution and license are in `harborrl/webui/static/lucide.min.js` and
+`harborrl/webui/static/lucide-LICENSE.txt`. No CDN connection is required.
+
 The public package does not vendor Slime, Megatron-LM, SGLang, Harbor, Claude
 Code, or model weights. Operators are responsible for reviewing the licenses of
 the exact external versions they pin and for complying with model and dataset
