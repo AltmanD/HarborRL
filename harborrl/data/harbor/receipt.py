@@ -1,4 +1,4 @@
-"""Strict scalar receipt parsing: a missing/invalid score is an infra failure."""
+"""Legacy TerminalEnv compatibility tooling; native training does not use this path."""
 
 import math
 

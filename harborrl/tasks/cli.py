@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
-from harborrl.data.harbor.native_inspector import inspect_native
+from harborrl.math_registry import NATIVE_TASK_PROVIDER
 
 
 def main(argv=None):
@@ -23,12 +23,12 @@ def main(argv=None):
     if args.command == "inspect":
         if not args.tasks_dir.is_dir():
             parser.error("tasks-dir must exist")
-        tasks = sorted(path.parent for path in args.tasks_dir.rglob("task.toml"))
+        tasks = NATIVE_TASK_PROVIDER.adapter.discover(args.tasks_dir)
         if not tasks:
             parser.error("no task.toml found")
         rows = []
         for task in tasks:
-            result = inspect_native(task)
+            result = NATIVE_TASK_PROVIDER.adapter.inspect(task)
             rows.append({
                 **result,
                 "dataset": args.dataset,

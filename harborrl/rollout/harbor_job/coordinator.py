@@ -12,10 +12,9 @@ import shlex
 from dataclasses import replace
 from pathlib import Path
 
+from harborrl.math_registry import CLAUDE_CODE_HARNESS
 from harborrl.trajectories.native import assemble, publish
 
-from .audit import audit_session
-from .bindings import sanitized_runner_env
 from .collector import collect
 
 
@@ -66,8 +65,7 @@ class GroupSlots:
         return export_group([self.completed[slot] for slot in self.identities], len(self.identities))
 
 
-def runner_command(runner_python, project, runner_host=None):
-    module = "harborrl.rollout.harbor_job.runner"
+def runner_command(runner_python, project, runner_host=None, *, module="harborrl.rollout.harbor_job.runner"):
     if runner_host is None:
         return [runner_python, "-m", module]
     remote = f"cd {shlex.quote(str(project))} && exec {shlex.quote(runner_python)} -m {module}"
@@ -77,13 +75,13 @@ def runner_command(runner_python, project, runner_host=None):
 
 async def run_attempt(identity, *, task_path, profile, gateway_url, runner_python,
                       root, registry, reward_profile, timeout=1800, cleanup_timeout=120,
-                      max_output_tokens=8192, runner_host=None):
+                      max_output_tokens=8192, runner_host=None, sandbox=None):
     """One real trial. CPU-only tests use a separate fake worker, never this path."""
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
     credential = secrets.token_urlsafe(32)
     project = str(Path(__file__).resolve().parents[3])
-    env = sanitized_runner_env(os.environ)
+    env = CLAUDE_CODE_HARNESS.adapter.runner_environment(os.environ)
     env["PYTHONPATH"] = project
     stderr = (root / "runner.stderr").open("wb")
     try:
@@ -100,6 +98,12 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         req = {"identity": identity.to_dict(), "task_path": str(Path(task_path).resolve()), "profile": profile,
                "gateway_url": gateway_url, "credential": credential, "output": str(root / "runner"),
                "max_output_tokens": max_output_tokens}
+        if sandbox is not None:
+            from harborrl.trajectories.native import digest
+            req.update(sandbox=sandbox, runtime_digest=digest(sandbox))
+            timeout = (sandbox['create_timeout_s'] + sandbox['cleanup_timeout_s'] * 2
+                       + sum(profile[k] for k in ('setup_timeout_sec', 'agent_timeout_sec', 'verifier_timeout_sec')))
+            cleanup_timeout = sandbox['cleanup_timeout_s'] + 15
         process.stdin.write(json.dumps(req).encode() + b"\n")
         await process.stdin.drain()
 
@@ -133,16 +137,26 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         await asyncio.wait_for(process.wait(), cleanup_timeout)
         if process.returncode != 0 or terminal["type"] != "terminal":
             raise RuntimeError("native trial did not finish normally")
+        if sandbox is not None:
+            from harborrl.trajectories.native import read_json
+            lifecycle_path = root / 'runner' / 'sandbox-lifecycle.json'
+            lifecycle = read_json(lifecycle_path) if lifecycle_path.is_file() else {}
+            if lifecycle.get('state') != 'deleted' or lifecycle.get('runtime_digest') != req['runtime_digest']:
+                publish(root / 'cleanup-required.json', {'identity': identity.to_dict(), 'reason': 'Sandbox deletion unconfirmed'})
+                raise RuntimeError('sandbox deletion unconfirmed')
         trial_dir = Path(terminal["trial_dir"]).resolve()
         result_path = Path(terminal["result_path"]).resolve()
         if not trial_dir.is_relative_to(root / "runner" / "harbor") or result_path != trial_dir / "result.json":
             raise ValueError("Runner result path is outside this attempt")
-        sessions = [p for p in (trial_dir / "agent" / "sessions" / "projects").rglob("*.jsonl")]
+        sessions = list((trial_dir / "agent" / "sessions" / "projects").rglob("*.jsonl"))
         if len(sessions) != 1:
             raise ValueError("expected exactly one native Claude session; auxiliary sessions require review")
-        audit_session(sessions[0], registry, identity.attempt_id)
+        registry.wait_delivered(identity.attempt_id, 30.0)
+        audit = CLAUDE_CODE_HARNESS.adapter.audit_session(sessions[0], registry, identity.attempt_id)
+        receipt = collect(identity, trial_id, result_path, trial_dir / "verifier", reward_profile)
+        CLAUDE_CODE_HARNESS.adapter.audit_empty_final(
+            trial_dir / "agent" / "claude-code.txt", registry, identity.attempt_id, audit)
         turns, seal = registry.seal(identity.attempt_id)
-        receipt = collect(identity, trial_id, terminal["result_path"], trial_dir / "verifier", reward_profile)
         publish(root / "evaluation.json", receipt)
         ir = assemble(identity, trial_id, turns, seal, receipt)
         publish(root / "trajectory.v2.json", ir)
@@ -152,6 +166,8 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         publish(root / "failure.json", {"identity": identity.to_dict(), "error_type": type(exc).__name__})
         raise
     finally:
+        if sandbox is not None and (root / 'runner' / 'cleanup-required.json').exists():
+            publish(root / 'cleanup-required.json', {'identity': identity.to_dict(), 'reason': 'Inspect runner/cleanup-required.json'})
         if registered:
             registry.close(identity.attempt_id)
         if process.returncode is None:

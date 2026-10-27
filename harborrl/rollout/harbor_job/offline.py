@@ -7,6 +7,7 @@ from urllib import request
 
 from harborrl.gateway.server import Gateway, make_server
 from harborrl.gateway.trace import TraceRegistry
+from harborrl.math_registry import CLAUDE_CODE_HARNESS
 from harborrl.rollout.exporters.native import export_group
 from harborrl.trajectories.native import (
     Identity,
@@ -17,7 +18,6 @@ from harborrl.trajectories.native import (
     require_ready,
 )
 
-from .audit import audit_session
 from .collector import collect
 
 
@@ -72,7 +72,9 @@ def smoke(output):
                 events.append({"sessionId": trial, "type": "assistant", "message": message})
             session.write_text("".join(json.dumps(e) + "\n" for e in events))
             registry.close(identity.attempt_id)
-            audit_session(session, registry, identity.attempt_id)
+            CLAUDE_CODE_HARNESS.adapter.audit_session(
+                session, registry, identity.attempt_id
+            )
             turns, seal = registry.seal(identity.attempt_id)
             publish(directory / "result.json", {"id": trial, "finished_at": "synthetic", "verifier_environment_mode": "shared",
                                                 "verifier_result": {"rewards": {"reward": slot}}})

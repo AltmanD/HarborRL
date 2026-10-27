@@ -1,11 +1,28 @@
-"""Slime v0.3.2 rollout function hook for complete Native Harbor groups."""
+"""Slime v0.3.2 rollout function hook for complete Native Harbor groups.
+
+This module is the training-side adapter: it maps Slime args and Sample
+objects onto the framework-free rollout core. When the manager runs the
+RolloutService (P3), groups are requested over HTTP instead of executing in
+this process; conversion to Slime samples is identical either way.
+"""
 from __future__ import annotations
 
 import asyncio
 import math
+import os
+from pathlib import Path
 
 from harborrl.backends.slime_v032.versions import lock_policy_version
 from harborrl.export.native import export_training_batch
+from harborrl.rollout.runtime import (
+    RolloutRuntimeConfig,
+    close_runtime,
+    current_policy_version,
+    digest,
+    run_group,
+    runtime,
+    task_entry,
+)
 
 
 def sampling_params(args):
@@ -21,6 +38,30 @@ def sampling_params(args):
     }
 
 
+def runtime_config_from_args(args):
+    """Map Slime runtime args onto the extracted rollout core config."""
+    endpoint = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    engine_count = int(args.rollout_num_gpus) // int(args.rollout_num_gpus_per_engine)
+    limit = max(1, int(args.sglang_server_concurrency) * engine_count)
+    return RolloutRuntimeConfig.from_environment(
+        os.environ, endpoint=endpoint, concurrency_limit=limit,
+        group_size=int(args.n_samples_per_prompt))
+
+
+def slime_tokenizer_loader(args):
+    """The single Slime dependency at the rollout boundary: the tokenizer."""
+    from slime.utils.processing_utils import load_tokenizer
+
+    return lambda: load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
+
+
+def group_index_of(group):
+    indexes = {getattr(sample, "group_index", None) for sample in group}
+    if len(indexes) != 1 or type(next(iter(indexes), None)) is not int:
+        raise ValueError("Slime must provide one group identity before native generation")
+    return indexes.pop()
+
+
 def assert_locked_policy_versions(ir_groups, policy_version):
     """Fail closed if any generation escaped the locked weight version."""
     for group in ir_groups:
@@ -32,11 +73,128 @@ def assert_locked_policy_versions(ir_groups, policy_version):
                 raise ValueError("native rollout observed a stale policy version")
 
 
+async def generate_group(args, group, sampling_params_, rollout_id, evaluation=False):
+    """Run one complete native group; evaluation is intentionally unsupported."""
+    from harborrl.math_registry import NATIVE_TASK_PROVIDER
+
+    if evaluation:
+        raise ValueError("native training rollout cannot be reused as evaluation")
+    if len(group) != args.n_samples_per_prompt:
+        raise ValueError("native rollout group is incomplete before launch")
+    entries = [task_entry(sample) for sample in group]
+    if any(entry != entries[0] for entry in entries[1:]):
+        raise ValueError("native rollout group mixes task locks")
+    entry = entries[0]
+    report = NATIVE_TASK_PROVIDER.adapter.inspect(
+        entry["path"], expected_digest=entry["task_digest"]
+    )
+    if report["status"] != "NEEDS_PROBE":
+        raise ValueError(f"native task preflight failed: {report['reasons']}")
+    stop = list(sampling_params_.get("stop") or [])
+    sampling_digest = digest({
+        "temperature": sampling_params_.get("temperature"),
+        "top_p": sampling_params_.get("top_p"),
+        "top_k": sampling_params_.get("top_k"),
+        "max_new_tokens": sampling_params_.get("max_new_tokens"),
+        "stop": stop,
+    })
+    config = runtime_config_from_args(args)
+    runtime_ = await runtime(config, tokenizer_loader=slime_tokenizer_loader(args))
+    policy_version = current_policy_version(runtime_)
+    trajectories = await run_group(
+        config, runtime_, entry=entry, group_index=group_index_of(group),
+        rollout_id=rollout_id, sampling_digest=sampling_digest,
+        policy_version=policy_version,
+    )
+    return bind_group_samples(group, trajectories)
+
+
+def bind_group_samples(group, trajectories):
+    """Attach trajectory evidence to Slime samples; order defines the slots."""
+    output = []
+    for sample, ir in zip(group, trajectories):
+        sample.metadata["native_ir"] = ir
+        sample.response = "native Harbor trial"
+        sample.reward = {"score": ir["evaluation"]["training_reward"]}
+        sample.status = sample.Status.COMPLETED
+        try:
+            sample.policy_version = int(ir["identity"]["policy_version"])
+        except ValueError as exc:
+            raise ValueError("native policy version must be an integer in Slime") from exc
+        output.append(sample)
+    return output
+
+
+async def run_service_groups(args, groups, rollout_id):
+    """Request complete groups from the manager-side RolloutService (P3)."""
+    from harborrl.backends.slime_v032.rollout_service_client import (
+        RolloutServiceClient,
+        fetch_pool_states,
+        load_group_result,
+        service_group_request,
+    )
+
+    token_file = os.environ.get('HARBORRL_ROLLOUT_SERVICE_TOKEN_FILE')
+    token = Path(token_file).read_text().strip() if token_file else os.environ.get('HARBORRL_ROLLOUT_SERVICE_TOKEN', '')
+    client = RolloutServiceClient(
+        os.environ["HARBORRL_ROLLOUT_SERVICE_URL"], os.environ["RUN_ID"],
+        token)
+    router = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    # Policy lifecycle (§7): the GPU job publishes its serving endpoint, then
+    # the manager admits the version the complete pool actually serves. The
+    # manager never opens a version some engine has not reached yet.
+    await asyncio.to_thread(client.announce_serving, router)
+    states = await asyncio.to_thread(fetch_pool_states, router)
+    from harborrl.consistency.config import environment
+    from harborrl.consistency.sglang import admit_pool
+    if environment()['mode'] != 'off':
+        await asyncio.to_thread(admit_pool, states, os.environ["RUN_DIR"])
+    await asyncio.to_thread(client.activate_policy, states, states[0]["weight_version"])
+    # The manager's activation publishes the locked policy-pool record into
+    # the shared run directory; lock the same version before requesting.
+    policy_version = lock_policy_version(args)
+    params = sampling_params(args)
+    async def request_group(group):
+        request = service_group_request(group, params, rollout_id, policy_version)
+        payload = await asyncio.to_thread(client.submit_group, request)
+        # The HTTP layer returns a status summary; completed work carries the
+        # GroupResult itself.
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            from harborrl.backends.slime_v032.rollout_service_client import (
+                ServiceRolloutError,
+            )
+            raise ServiceRolloutError(
+                f"group {request['group_id']} is {payload.get('status')!r}: "
+                f"{payload.get('error', '')}")
+        irs = load_group_result(client.run_id, request, result, allow_synthetic=False)
+        bind_group_samples(group, irs)
+        return irs
+
+    pending = [asyncio.create_task(request_group(group)) for group in groups]
+    try:
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        # Retain independent groups' evidence, but never export a partial batch.
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return results
+    except BaseException:
+        # HTTP workers keep running until the manager acknowledges cancellation.
+        try:
+            await asyncio.to_thread(client.cancel_run)
+        finally:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise
+
+
 async def run_native_groups(args, groups, policy_version, rollout_id):
     """Run every group concurrently and return only complete IR evidence."""
-    from harborrl.rollout.native_generate import close_runtime, generate_group
-
     params = sampling_params(args)
+    if os.environ.get("HARBORRL_ROLLOUT_SERVICE_URL"):
+        ir_groups = await run_service_groups(args, groups, rollout_id)
+        assert_locked_policy_versions(ir_groups, policy_version)
+        return ir_groups
     try:
         results = await asyncio.gather(*(
             generate_group(args, group, params, rollout_id=rollout_id) for group in groups

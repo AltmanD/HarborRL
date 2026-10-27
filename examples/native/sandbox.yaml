@@ -1,0 +1,10 @@
+# Standard OpenSandbox; install harborrl[sandbox] in a Python 3.12+ runner.
+domain: https://sandbox.example
+credential_file: /run/secrets/harborrl/sandbox-key
+max_live_instances: 2
+startup_concurrency: 1
+bindings:
+  - image: registry.example/project/task:locked-version
+    max_live_instances: 2
+# Omit installation to use normal Harbor agent setup. Offline deployments
+# may supply mode, version, binary and sha256; see docs/sandbox-rollout.md.

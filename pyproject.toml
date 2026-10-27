@@ -16,10 +16,20 @@ dependencies = [
 harborrl = "harborrl.cli:main"
 
 [project.optional-dependencies]
+distill = [
+  "torch>=2.5,<3",
+  "transformers>=4.49,<5",
+]
+sandbox = [
+  "harbor==0.23.0; python_version >= '3.12'",
+  "opensandbox==0.1.9; python_version >= '3.12'",
+  "httpx>=0.27,<1",
+]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
   "ruff>=0.8",
+  "httpx>=0.27,<1",
 ]
 
 [tool.uv]
@@ -31,6 +41,8 @@ exclude = ["runs*", ".venv*", "workspace*", "local*", "docs*", "tests*"]
 
 [tool.setuptools.package-data]
 "harborrl.platform" = ["*.sh"]
+"harborrl.options" = ["resources/*.yaml"]
+"harborrl.webui" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -58,7 +58,7 @@ def convert(payload, *, model, max_output_tokens=8192, count_only=False):
         raise ProtocolError("unsupported context management control")
     effort = payload.get("output_config")
     if effort is not None and (not isinstance(effort, dict) or set(effort) != {"effort"}
-                               or effort["effort"] not in ("low", "medium", "high")):
+                               or effort["effort"] not in ("low", "medium", "high", "xhigh")):
         raise ProtocolError("unsupported output configuration")
     if not isinstance(payload.get("tools", []), list):
         raise ProtocolError("tools must be a list")
@@ -138,7 +138,13 @@ def parse_qwen_output(text, *, response_id, tools):
     """Deterministic Qwen tool markers; malformed model output is never repaired."""
     if "<think>" in text or "</think>" in text:
         raise ProtocolError("thinking output is not enabled by this profile")
-    names = {tool["function"]["name"] for tool in tools}
+    names = {}
+    for tool in tools:
+        name = tool["function"]["name"]
+        alias = name.casefold()
+        if alias in names:
+            raise ProtocolError("ambiguous generated tool alias")
+        names[alias] = name
     blocks, offset = [], 0
     matches = list(re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", text, re.DOTALL))
     remainder = re.sub(r"<tool_call>\s*(.*?)\s*</tool_call>", "", text, flags=re.DOTALL)
@@ -152,9 +158,17 @@ def parse_qwen_output(text, *, response_id, tools):
         except ValueError as exc:
             raise ProtocolError("invalid generated tool JSON") from exc
         keys(call, ("name", "arguments"), "generated tool")
-        if call.get("name") not in names or not isinstance(call.get("arguments"), dict):
-            raise ProtocolError("unknown generated tool or invalid arguments")
-        blocks.append({"type": "tool_use", "id": f"toolu_{response_id}_{index}", "name": call["name"], "input": call["arguments"]})
+        generated_name = call.get("name")
+        if generated_name == "finish" and call.get("arguments") == {}:
+            if text[match.end():]:
+                raise ProtocolError("finish marker must be the final output")
+            return blocks
+        canonical_name = names.get(generated_name.casefold()) if isinstance(generated_name, str) else None
+        if canonical_name is None:
+            raise ProtocolError(f"unknown generated tool: {generated_name!r}")
+        if not isinstance(call.get("arguments"), dict):
+            raise ProtocolError("generated tool arguments are not an object")
+        blocks.append({"type": "tool_use", "id": f"toolu_{response_id}_{index}", "name": canonical_name, "input": call["arguments"]})
         offset = match.end()
     if text[offset:] or not blocks:
         blocks.append({"type": "text", "text": text[offset:]})
