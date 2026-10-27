@@ -6,11 +6,11 @@ import pytest
 torch = pytest.importorskip('torch')
 pytest.importorskip('transformers')
 
-from harborrl.consistency.config import validate  # noqa: E402
-from harborrl.consistency.report import assess, distributed_gate  # noqa: E402
-from harborrl.distill.config import DEFAULTS  # noqa: E402
-from harborrl.distill.models import load_student, parameter_digest, response_logprobs  # noqa: E402
-from harborrl.distill.runner import optimize  # noqa: E402
+from harborrl.consistency.config import validate
+from harborrl.consistency.report import assess, distributed_gate
+from harborrl.distill.config import DEFAULTS
+from harborrl.distill.models import load_student, parameter_digest, response_logprobs
+from harborrl.distill.runner import optimize
 
 
 def test_gate_rejects_before_optimizer_or_gradient(tmp_path):
