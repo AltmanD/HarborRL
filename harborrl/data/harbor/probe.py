@@ -1,11 +1,4 @@
-"""Probe a Harbor task with native Docker verifier semantics.
-
-The legacy TerminalEnv comparison path is intentionally not part of the public
-release.  This probe runs the untouched task verifier twice in isolated
-containers and requires the same scalar reward, which keeps the check aligned
-with the Native Harbor Runner boundary without importing the old environment
-stack.
-"""
+"""Legacy TerminalEnv compatibility tooling; native training does not use this path."""
 from __future__ import annotations
 
 import asyncio

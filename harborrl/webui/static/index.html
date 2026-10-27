@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>HarborRL · Training console</title>
+    <link rel="icon" href="/brand.jpg" type="image/jpeg" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/lucide.min.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="HarborRL home"
+        ><img src="/brand.jpg" alt="HarborRL"
+      /></a>
+      <span class="app-title">Training console</span>
+      <div class="connection">
+        <span class="dot"></span><span id="connection-text">Connecting</span>
+      </div>
+    </header>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="nav-caption">WORKSPACE</div>
+        <nav aria-label="Main navigation">
+          <button class="nav-item active" data-view="configuration">
+            <i data-lucide="sliders-horizontal"></i>Configuration
+          </button>
+          <button class="nav-item" data-view="runs">
+            <i data-lucide="activity"></i>Runs<span id="run-count" class="count"
+              >0</span
+            >
+          </button>
+        </nav>
+        <div class="saved-heading">
+          <span class="nav-caption">SAVED CONFIGURATIONS</span
+          ><button
+            id="new-config"
+            class="icon-button"
+            title="New configuration"
+            aria-label="New configuration"
+          >
+            <i data-lucide="plus"></i>
+          </button>
+        </div>
+        <div id="saved-list" class="saved-list">
+          <span class="muted">No configurations yet</span>
+        </div>
+        <div class="sidebar-bottom">
+          <i data-lucide="folder-open"></i
+          ><span id="workspace-path">Local workspace</span>
+        </div>
+      </aside>
+      <main>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <section id="configuration-view">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">EXPERIMENT SETUP</div>
+              <h1>Training configuration</h1>
+            </div>
+            <div class="toolbar">
+              <button
+                id="mobile-new"
+                class="icon-button mobile-only"
+                title="New configuration"
+                aria-label="New configuration"
+              >
+                <i data-lucide="plus"></i>
+              </button>
+              <button id="import-button" class="secondary">
+                <i data-lucide="upload"></i>Import answers</button
+              ><button
+                id="answers-button"
+                class="icon-button"
+                title="Edit advanced answers"
+                aria-label="Edit advanced answers"
+              >
+                <i data-lucide="braces"></i></button
+              ><input
+                id="import-file"
+                type="file"
+                accept=".yaml,.yml,.json"
+                hidden
+              />
+            </div>
+          </div>
+          <div class="configuration-name">
+            <label for="config-name">Configuration name</label
+            ><input
+              id="config-name"
+              value="experiment"
+              maxlength="64"
+              pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}"
+              autocomplete="off"
+            /><span id="draft-state" class="badge">Draft</span>
+          </div>
+          <nav id="steps" class="steps" aria-label="Configuration sections">
+            <button data-step="0" class="active">
+              <span>1</span>Deployment</button
+            ><button data-step="1"><span>2</span>Model &amp; tasks</button
+            ><button data-step="2"><span>3</span>Training</button
+            ><button data-step="3"><span>4</span>Review &amp; launch</button>
+          </nav>
+          <div class="editor-layout">
+            <div class="editor">
+              <div id="form-sections"></div>
+              <section id="review" hidden>
+                <div class="section-heading">
+                  <h2>Configuration checks</h2>
+                  <button id="check-files" class="secondary">
+                    <i data-lucide="check-check"></i>Check local files
+                  </button>
+                </div>
+                <div id="validation-result" class="validation-result">
+                  No checks run
+                </div>
+                <div class="section-heading preview-heading">
+                  <h2>Generated files</h2>
+                  <button
+                    id="download-file"
+                    class="icon-button"
+                    title="Download selected file"
+                    aria-label="Download selected file"
+                  >
+                    <i data-lucide="download"></i>
+                  </button>
+                </div>
+                <div id="file-tabs" class="file-tabs">
+                  <button data-file="config.yaml" class="active">
+                    config.yaml</button
+                  ><button data-file="deployment.yaml">deployment.yaml</button
+                  ><button data-file="setup-manifest.json">manifest</button>
+                </div>
+                <pre id="config-preview" class="code-panel">
+Complete required fields to preview.</pre
+                >
+                <div class="launch-section">
+                  <div>
+                    <h2>Launch</h2>
+                    <p class="muted">
+                      Live runs use the controller environment and configured
+                      GPU target.
+                    </p>
+                  </div>
+                  <div class="launch-actions">
+                    <button id="dry-run" class="secondary" disabled>
+                      <i data-lucide="scan-line"></i>Dry-run</button
+                    ><button id="doctor" class="secondary" disabled>
+                      <i data-lucide="stethoscope"></i>Doctor</button
+                    ><button id="train" class="primary" disabled>
+                      <i data-lucide="play"></i>Start training
+                    </button>
+                  </div>
+                </div>
+              </section>
+              <div class="editor-footer">
+                <button id="previous" class="secondary">
+                  <i data-lucide="arrow-left"></i>Back</button
+                ><span id="step-description" class="muted">Step 1 of 4</span
+                ><button id="next" class="primary">
+                  Continue<i data-lucide="arrow-right"></i></button
+                ><button id="save" class="primary" hidden>
+                  <i data-lucide="save"></i>Save configuration
+                </button>
+              </div>
+            </div>
+            <aside class="summary" aria-label="Experiment summary">
+              <div class="summary-heading">
+                <i data-lucide="workflow"></i>
+                <h2>Execution plan</h2>
+              </div>
+              <div id="topology" class="topology"></div>
+              <div id="resource-summary"></div>
+              <div class="summary-footer">
+                <span class="status-dot"></span
+                ><span id="summary-status">Unsaved configuration</span>
+              </div>
+            </aside>
+          </div>
+        </section>
+        <section id="runs-view" hidden>
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">EXECUTION</div>
+              <h1>Runs</h1>
+            </div>
+            <button
+              id="refresh-jobs"
+              class="icon-button"
+              title="Refresh runs"
+              aria-label="Refresh runs"
+            >
+              <i data-lucide="refresh-cw"></i>
+            </button>
+          </div>
+          <div id="jobs-list"></div>
+          <div id="log-selector" class="log-selector" hidden>
+            <label for="log-source">Log source</label
+            ><select id="log-source" class="small-select">
+              <option value="console">Controller</option>
+              <option value="training">GPU training</option>
+            </select>
+          </div>
+          <section id="job-detail" hidden>
+            <div class="section-heading">
+              <div>
+                <h2 id="job-title">Run</h2>
+                <p id="job-meta" class="muted"></p>
+              </div>
+              <div class="toolbar">
+                <button
+                  id="copy-log"
+                  class="icon-button"
+                  title="Download log"
+                  aria-label="Download log"
+                >
+                  <i data-lucide="download"></i></button
+                ><button id="reconcile-job" class="secondary" hidden>
+                  Confirm cleanup</button
+                ><button id="stop-job" class="danger" hidden>
+                  <i data-lucide="square"></i>Stop
+                </button>
+              </div>
+            </div>
+            <pre id="job-log" class="code-panel log-panel" tabindex="0"></pre>
+            <div id="log-note" class="muted"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <dialog id="confirm-dialog">
+      <form method="dialog">
+        <div class="dialog-heading">
+          <h2 id="confirm-title">Confirm</h2>
+          <button value="cancel" class="icon-button" aria-label="Close">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <p id="confirm-message"></p>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary">Cancel</button
+          ><button value="confirm" class="primary" id="confirm-action">
+            Confirm
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="answers-dialog">
+      <div class="dialog-heading">
+        <h2>Advanced answers</h2>
+        <button
+          id="close-answers"
+          class="icon-button"
+          aria-label="Close advanced answers"
+        >
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <p id="answers-error" class="notice" role="alert" hidden></p>
+      <textarea
+        id="answers-editor"
+        spellcheck="false"
+        aria-label="Answers YAML or JSON"
+      ></textarea>
+      <div class="dialog-actions">
+        <button id="export-answers" class="secondary">
+          <i data-lucide="download"></i>Export answers</button
+        ><button id="apply-answers" class="primary">Apply answers</button>
+      </div>
+    </dialog>
+  </body>
+</html>

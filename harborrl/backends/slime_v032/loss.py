@@ -104,5 +104,12 @@ def loss_function(args, batch, logits, unused_reducer):
         "native_token_count": loss_masks.sum().detach(),
         "native_group_count": weight_sum.detach().round(),
     }
+    from harborrl.consistency.config import environment
+    if environment()["mode"] != "off":
+        p0 = torch.cat(batch["log_probs"]).detach()
+        current = torch.cat(output["log_probs"]).detach()
+        metrics["consistency_backend_abs_sum"] = ((p0 - old_logprobs).abs() * loss_masks).sum()
+        metrics["consistency_update_abs_sum"] = ((current - p0).abs() * loss_masks).sum()
+        metrics["consistency_valid_tokens"] = loss_masks.sum().detach()
     return loss * LOSS_SCALE_CORRECTION, metrics
 

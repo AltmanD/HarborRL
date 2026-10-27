@@ -13,8 +13,10 @@ def main(argv=None):
     smoke.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     if args.command == "inspect":
-        from harborrl.data.harbor.native_inspector import inspect_native
-        result = inspect_native(args.task, expected_digest=args.expected_digest)
+        from harborrl.math_registry import NATIVE_TASK_PROVIDER
+        result = NATIVE_TASK_PROVIDER.adapter.inspect(
+            args.task, expected_digest=args.expected_digest
+        )
         print(json.dumps(result, indent=2))
         return int(result["status"] in ("INVALID", "UNSUPPORTED"))
     from .offline import smoke as run_smoke

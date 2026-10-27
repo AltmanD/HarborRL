@@ -1,0 +1,30 @@
+# Replace every example path and REPLACE_* value. No model fit is implied.
+answers_version: 1
+preset: embedded-local
+training:
+  tasks:
+    catalog: /srv/harborrl/inputs/tasks.jsonl
+  harness:
+    profile: /srv/harborrl/inputs/claude-code.json
+  harbor:
+    python: /opt/harbor/bin/python
+  model:
+    checkpoint: /srv/models/qwen
+    reference: /srv/models/qwen-reference
+    args_file: qwen3-8B
+  gateway:
+    tokenizer_digest: REPLACE_WITH_ACTUAL_TOKENIZER_SHA256
+    template_digest: REPLACE_WITH_ACTUAL_TEMPLATE_SHA256
+  deployment:
+    layout: colocate
+    num_gpus: 1
+  sampling:
+    group_size: 2
+    groups_per_batch: 1
+deployment:
+  manager:
+    source_dir: /srv/harborrl/source
+    controller_python: /opt/controller/bin/python
+  gpu_target:
+    source_dir: /srv/harborrl/source
+    train_python: /opt/training/bin/python

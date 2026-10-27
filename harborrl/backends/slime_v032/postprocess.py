@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import math
 
-from harborrl.trajectories.native import finite
-
 REQUIRED_FIELDS = (
     "tokens",
     "response_lengths",
@@ -34,7 +32,7 @@ def _integer_scalar(value):
     return int(number) if math.isfinite(number) and number.is_integer() else None
 
 
-def rollout_data_postprocess(args, rollout_id, rollout_data):
+def _validate_rollout_data(args, rollout_id, rollout_data):
     """Slime ``--rollout-data-postprocess-path`` hook; fail closed on drift."""
     missing = [field for field in REQUIRED_FIELDS if field not in rollout_data]
     if missing:
@@ -51,8 +49,11 @@ def rollout_data_postprocess(args, rollout_id, rollout_data):
     group_size = int(getattr(args, "n_samples_per_prompt", 0))
     if group_size < 2:
         raise ValueError("native training requires a complete group")
-    local_weight_sum = 0.0
+    group_weights = {}
     for index in range(count):
+        group_id = _integer_scalar(rollout_data["rollout_ids"][index])
+        if group_id is None or group_id < 0:
+            raise ValueError("invalid native rollout id")
         response_length = _integer_scalar(rollout_data["response_lengths"][index])
         mask = rollout_data["loss_masks"][index]
         logprobs = rollout_data["rollout_log_probs"][index]
@@ -71,8 +72,22 @@ def rollout_data_postprocess(args, rollout_id, rollout_data):
             raise ValueError("invalid native rollout mask sum")
         if truncated is None or truncated not in (0, 1):
             raise ValueError("invalid native truncated flag")
-        local_weight_sum += sum(
-            1.0 / (group_size * mask_sum) for flag in mask if flag
+        group_weights.setdefault(group_id, []).append(
+            sum(1 for flag in mask if flag) / (group_size * mask_sum)
         )
-    if not finite(local_weight_sum) or local_weight_sum > 1.0 + 1e-9:
-        raise ValueError(f"native local weights exceed the one-per-group budget: {local_weight_sum}")
+    # Actor shards may contain partial groups; each group has its own unit budget.
+    for group_id, weights in group_weights.items():
+        local_weight_sum = math.fsum(weights)
+        if not math.isfinite(local_weight_sum) or local_weight_sum > 1.0 + 1e-9:
+            raise ValueError(
+                f"native local weights exceed the one-per-group budget for rollout id "
+                f"{group_id}: {local_weight_sum}"
+            )
+
+
+def rollout_data_postprocess(args, rollout_id, rollout_data):
+    from harborrl.consistency.config import environment
+    if environment()["mode"] == "off":
+        return _validate_rollout_data(args, rollout_id, rollout_data)
+    from harborrl.consistency.slime import check_training_batch
+    return check_training_batch(args, rollout_id, rollout_data, _validate_rollout_data)

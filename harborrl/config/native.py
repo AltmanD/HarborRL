@@ -1,19 +1,18 @@
 """Strict native schema 2; local paths resolve relative to the config file."""
-import json
 import os
 import re
-import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml
 
-from harborrl.rollout.harbor_job.bindings import claude_config
-from harborrl.trajectories.native import RewardProfile
+from harborrl.consistency.config import DEFAULTS as CONSISTENCY_DEFAULTS
+from harborrl.consistency.config import validate as validate_consistency
 
 FIELDS = {
+    'consistency': set(CONSISTENCY_DEFAULTS),
     'execution': {'backend'}, 'tasks': {'catalog'}, 'harness': {'name', 'profile'},
-    'harbor': {'python', 'version', 'workers'},
+    'harbor': {'python', 'version', 'workers', 'runner_transport', 'environment'},
     'gateway': {'host', 'port', 'advertised_url', 'tokenizer_digest', 'template_digest', 'audited_raw_logprobs'},
     'model': {'checkpoint', 'reference', 'args_file'},
     'training': {'num_rollout', 'learning_rate', 'save_interval', 'backend_contract'},
@@ -21,6 +20,7 @@ FIELDS = {
     'deployment': {'layout', 'num_gpus', 'actor_gpus', 'rollout_gpus', 'actor_tensor_parallel_size', 'rollout_gpus_per_engine'},
     'output': {'root'},
 }
+OPTIONAL = {'harbor': {'runner_transport', 'environment'}}
 
 
 class SelectedConfig(dict):
@@ -32,7 +32,10 @@ class SelectedConfig(dict):
 def load_config(path, overrides=None, task_ids=None):
     """Load one schema-2 YAML file and apply strict ``section.key=value`` overrides."""
     path = Path(path).resolve()
-    config = yaml.safe_load(path.read_text())
+    try:
+        config = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        raise ValueError(f'configuration YAML: {exc}') from exc
     if not isinstance(config, dict):
         raise TypeError('configuration must be a mapping')
     if config.get('schema_version') != 2:
@@ -45,8 +48,12 @@ def load_config(path, overrides=None, task_ids=None):
         if (not separator or field not in FIELDS.get(section_name, ())
                 or not isinstance(section, dict)):
             raise ValueError(f'unknown native override: {key}')
-        section[field] = yaml.safe_load(value)
+        try:
+            section[field] = yaml.safe_load(value)
+        except yaml.YAMLError as exc:
+            raise ValueError(f'{key}: invalid YAML override') from exc
     config = validate(config, path)
+    validate_files(config)
     if task_ids is None:
         return config
     if (not isinstance(task_ids, (list, tuple)) or not task_ids
@@ -57,16 +64,19 @@ def load_config(path, overrides=None, task_ids=None):
 
 
 def validate(config, path):
-    from harborrl.trajectories.native import read_json
+    if not isinstance(config, dict):
+        raise TypeError('configuration must be a mapping')
+    config['consistency'] = validate_consistency(config.get('consistency'))
     if set(config) != set(FIELDS) | {'schema_version'} or type(config['schema_version']) is not int or config['schema_version'] != 2:
         raise ValueError('native schema requires exactly the documented schema 2 sections')
+    if not isinstance(config['training'], dict):
+        raise TypeError('training must be a mapping')
     config['training'].setdefault(
         'backend_contract', 'slime-v0.3.2-native-v1')
     for section, fields in FIELDS.items():
-        if not isinstance(config[section], dict) or set(config[section]) != fields:
+        actual = set(config[section]) if isinstance(config[section], dict) else set()
+        if not isinstance(config[section], dict) or not fields - OPTIONAL.get(section, set()) <= actual <= fields:
             raise ValueError(f'{section} requires exactly {sorted(fields)}')
-    if config['execution']['backend'] != 'harbor_job' or config['harness']['name'] != 'claude_code' or config['harbor']['version'] != '0.23.0':
-        raise ValueError('native requires harbor_job / claude_code / Harbor 0.23.0')
     for section, key in [('tasks','catalog'), ('harness','profile'), ('harbor','python'),
                          ('model','checkpoint'), ('model','reference'), ('output','root')]:
         value = config[section][key]
@@ -82,133 +92,90 @@ def validate(config, path):
                 raise ValueError(f'{section}.{key} must be a positive integer')
     from harborrl.backends.slime_v032.versions import CONFIG_CONTRACTS
     from harborrl.trajectories.native import finite
-    if config['training']['backend_contract'] not in CONFIG_CONTRACTS:
+    if (not isinstance(config['training']['backend_contract'], str)
+            or config['training']['backend_contract'] not in CONFIG_CONTRACTS):
         raise ValueError(f"training.backend_contract must be one of {sorted(CONFIG_CONTRACTS)}")
     if not finite(config['training']['learning_rate']) or config['training']['learning_rate'] <= 0:
-        raise ValueError('positive finite learning_rate required')
+        raise ValueError('training.learning_rate must be positive and finite')
     g, d, s = config['gateway'], config['deployment'], config['sampling']
     if type(g['audited_raw_logprobs']) is not bool or not 0 < g['port'] < 65536:
-        raise ValueError('invalid gateway audit flag or port')
+        raise ValueError('gateway.audited_raw_logprobs must be boolean and gateway.port must be in 1..65535')
     for key in ('host','tokenizer_digest','template_digest'):
         if not isinstance(g[key], str) or not g[key].strip():
             raise ValueError(f'gateway.{key} required')
+    if not isinstance(g['advertised_url'], str):
+        raise TypeError('gateway.advertised_url must be a string')
     advertised = urlsplit(g['advertised_url'])
     if (advertised.scheme not in ('http', 'https') or not advertised.hostname
             or advertised.username or advertised.password or advertised.query or advertised.fragment
             or advertised.path not in ('', '/') or advertised.port != g['port']):
         raise ValueError('advertised gateway must be a plain origin and match listener port')
-    if s['group_size'] < 2 or s['max_tokens'] >= s['max_context']:
-        raise ValueError('invalid group or context budget')
-    if d['layout'] not in ('split','colocate'):
+    if s['group_size'] < 2:
+        raise ValueError('sampling.group_size must be at least 2')
+    if s['max_tokens'] >= s['max_context']:
+        raise ValueError('sampling.max_tokens must be below sampling.max_context')
+    if not isinstance(d['layout'], str) or d['layout'] not in ('split','colocate'):
         raise ValueError('layout must be split or colocate')
     if d['layout'] == 'split' and d['actor_gpus'] + d['rollout_gpus'] > d['num_gpus']:
-        raise ValueError('GPU budget exceeded')
+        raise ValueError('GPU budget exceeded: deployment.actor_gpus + deployment.rollout_gpus > deployment.num_gpus')
     if d['layout'] == 'colocate' and not d['actor_gpus'] == d['rollout_gpus'] == d['num_gpus']:
         raise ValueError('colocate GPU counts must match')
     if d['actor_gpus'] % d['actor_tensor_parallel_size'] or d['rollout_gpus'] % d['rollout_gpus_per_engine']:
-        raise ValueError('GPU counts must be divisible by TP')
+        raise ValueError('deployment GPU counts must be divisible by their tensor parallel sizes')
     preset = config['model']['args_file']
     if not isinstance(preset,str) or not re.fullmatch(r'[A-Za-z0-9_-]+',preset):
         raise ValueError('model.args_file must name a Slime model preset; SLIME_DIR is checked by doctor')
     for key in ('tokenizer_digest', 'template_digest'):
         if not re.fullmatch(r'[0-9a-f]{64}', g[key]):
             raise ValueError(f'gateway.{key} must be a SHA-256 digest')
-    workers = config['harbor']['workers']
-    if (not isinstance(workers, list) or not workers or any(
+    harbor = config['harbor']
+    transport = harbor.get('runner_transport', 'ssh')
+    if transport not in ('ssh', 'local'):
+        raise ValueError('harbor.runner_transport must be ssh or local')
+    environment = harbor.get('environment', {'runtime': 'docker'})
+    if not isinstance(environment, dict) or environment.get('runtime') not in ('docker', 'sandbox'):
+        raise ValueError('harbor.environment.runtime must be docker or sandbox')
+    expected = {'runtime', 'config'} if environment['runtime'] == 'sandbox' else {'runtime'}
+    if set(environment) != expected:
+        raise ValueError('invalid harbor.environment fields')
+    if environment['runtime'] == 'sandbox':
+        if not isinstance(environment['config'], str) or not environment['config']:
+            raise ValueError('sandbox config path required')
+        environment['config'] = str((Path(path).parent / environment['config']).resolve())
+    workers = harbor['workers']
+    if (not isinstance(workers, list) or (transport == 'ssh' and not workers) or any(
             not isinstance(worker, str) or not re.fullmatch(r'[A-Za-z0-9_.:+@-]+', worker) or worker.startswith('-')
             for worker in workers)):
         raise ValueError('harbor.workers must contain nonempty SSH destinations')
-    claude_config(read_json(config['harness']['profile']), g['advertised_url'], 'validation-only')
+    if transport == 'local' and workers:
+        raise ValueError('local runner requires empty harbor.workers')
+    from harborrl.math_registry import select_math, validate_combination
+    validate_combination(select_math(config), config)
+    return config
+
+
+def validate_files(config):
+    """Check harness profile files separately from pure schema validation."""
+    from harborrl.math_registry import select_math
+    from harborrl.trajectories.native import read_json
+    harness = select_math(config).harness
+    try:
+        harness.adapter.validate_profile(
+            read_json(config['harness']['profile']),
+            config['gateway']['advertised_url'],
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError(f'harness.profile: {exc}') from exc
     return config
 
 
 def catalog(config):
-    from harborrl.data.harbor.native_inspector import inspect_native
-    from harborrl.trajectories.native import read_json
-    path = Path(config['tasks']['catalog'])
-    entries = read_json(path)
-    if not isinstance(entries,list) or not entries:
-        raise ValueError('catalog must be a nonempty JSON list')
-    seen = set()
-    for entry in entries:
-        if (set(entry) != {'id','revision','path','task_digest','reward_profile'}
-                or not isinstance(entry['id'], str) or not entry['id'].strip()
-                or not isinstance(entry['revision'], str) or not entry['revision'].strip()
-                or entry['id'] in seen):
-            raise ValueError('invalid or duplicate catalog identity')
-        if (not isinstance(entry['path'], str) or not entry['path'].strip()
-                or not isinstance(entry['task_digest'], str)
-                or not re.fullmatch(r'[0-9a-f]{64}', entry['task_digest'])
-                or not isinstance(entry['reward_profile'], dict)):
-            raise ValueError(f'invalid native task lock: {entry["id"]}')
-        seen.add(entry['id'])
-        entry['path'] = str((path.parent / entry['path']).resolve())
-        report = inspect_native(entry['path'], expected_digest=entry['task_digest'])
-        if report['status'] != 'NEEDS_PROBE':
-            raise ValueError(f"task preflight failed: {entry['id']}: {report['reasons']}")
-        RewardProfile(**entry['reward_profile'])
-    selected = set(getattr(config, 'task_ids', ()))
-    if selected:
-        missing = selected - {entry['id'] for entry in entries}
-        if missing:
-            raise ValueError(f'task selector not found in catalog: {min(missing)}')
-        entries = [entry for entry in entries if entry['id'] in selected]
-    return entries
+    """Compatibility entry point for task lock validation."""
+    from harborrl.tasks.catalog import catalog as inspect_catalog
+    return inspect_catalog(config)
 
 
 def launch_plan(config):
-    from harborrl.backends.slime_v032.versions import runtime_contract_id
-    from harborrl.config import ROOT
-    catalog(config)
-    c = config
-    worker_overrides = os.environ.get('HARBORRL_NATIVE_TASK_WORKER_OVERRIDES', '{}')
-    try:
-        overrides = json.loads(worker_overrides)
-        valid_workers = set(c['harbor']['workers'])
-        if (not isinstance(overrides, dict) or any(not isinstance(key, str) or value not in valid_workers
-                                                   for key, value in overrides.items())):
-            raise ValueError
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise ValueError('invalid HARBORRL_NATIVE_TASK_WORKER_OVERRIDES') from exc
-    environment = {
-        'DATASET': 'native', 'ALGO': 'grpo', 'HARNESS_OPTION': 'native-claude-code',
-        'HF_CKPT': c['model']['checkpoint'], 'REF_LOAD': c['model']['reference'],
-        'MODEL_ARGS_FILE': c['model']['args_file'], 'MODEL_TAG': c['model']['args_file'],
-        'NUM_ROLLOUT': c['training']['num_rollout'], 'SAVE_INTERVAL': c['training']['save_interval'],
-        'TRAIN_PYTHON': sys.executable,
-        'ROLLOUT_BATCH_SIZE': c['sampling']['groups_per_batch'],
-        'N_SAMPLES': c['sampling']['group_size'],
-        'ROLLOUT_MAX_RESPONSE_LEN': c['sampling']['max_tokens'],
-        'ROLLOUT_MAX_CONTEXT_LEN': c['sampling']['max_context'],
-        'NUM_GPUS': c['deployment']['num_gpus'], 'ACTOR_GPUS': c['deployment']['actor_gpus'],
-        'ROLLOUT_GPUS': c['deployment']['rollout_gpus'],
-        'TP_SIZE': c['deployment']['actor_tensor_parallel_size'],
-        'ROLLOUT_NUM_GPUS_PER_ENGINE': c['deployment']['rollout_gpus_per_engine'],
-        'HARBORRL_GPU_LAYOUT': c['deployment']['layout'],
-        'HARBORRL_STRUCTURED_LAUNCH': '1', 'HARBORRL_VERIFY_POLICY_POOL': '1',
-        'HARBORRL_SKIP_GLOBAL_CLEANUP': '1', 'SLIME_RAY_PLACEMENT_GPU_PROBE': '1',
-        'PYTORCH_CUDA_ALLOC_CONF': ('max_split_size_mb:2048' if c['deployment']['layout'] == 'colocate'
-                                    else 'max_split_size_mb:2048,expandable_segments:True'),
-        'HARBORRL_NATIVE_ROLLOUT': '1',
-        'HARBORRL_NATIVE_SLIME_CONTRACT': runtime_contract_id(c['training']['backend_contract']),
-        'HARBORRL_NATIVE_RUNNER_PYTHON': c['harbor']['python'],
-        'HARBORRL_NATIVE_RUNNER_WORKERS': json.dumps(c['harbor']['workers']),
-        'HARBORRL_NATIVE_TASK_WORKER_OVERRIDES': json.dumps(overrides, sort_keys=True),
-        'HARBORRL_NATIVE_PROFILE': c['harness']['profile'],
-        'HARBORRL_NATIVE_CATALOG': c['tasks']['catalog'],
-        'HARBORRL_NATIVE_GATEWAY_HOST': c['gateway']['host'],
-        'HARBORRL_NATIVE_GATEWAY_PORT': c['gateway']['port'],
-        'HARBORRL_NATIVE_GATEWAY_URL': c['gateway']['advertised_url'],
-        'HARBORRL_NATIVE_TOKENIZER_DIGEST': c['gateway']['tokenizer_digest'],
-        'HARBORRL_NATIVE_TEMPLATE_DIGEST': c['gateway']['template_digest'],
-        'HARBORRL_NATIVE_AUDITED_LOGPROBS': str(int(c['gateway']['audited_raw_logprobs'])),
-        'HARBORRL_NATIVE_MAX_ATTEMPTS': c['sampling']['max_attempts'],
-        'HARBORRL_NATIVE_DRAIN_TIMEOUT': '30',
-        'RUNS_ROOT': c['output']['root'], 'WANDB_ENABLE': '0',
-    }
-    return {'config': config, 'command': [sys.executable, '-m', 'harborrl.platform.native_train'],
-            'environment': {key: str(value) for key, value in environment.items()},
-            'training_command': ['bash', str(ROOT / 'harborrl/platform/slime_train.sh')],
-            'required_services': ['GPU Ray / SGLang / Messages Gateway', 'external CPU Harbor Docker workers'],
-            'launcher': 'native Claude Code → Messages Gateway → Harbor verifier → Slime GRPO',
-            'layout': {'mode': config['deployment']['layout'], 'offload': config['deployment']['layout']=='colocate'}}
+    """Compatibility entry point for backend launch mapping."""
+    from harborrl.backends.slime_v032.config import launch_plan as build_plan
+    return build_plan(config)

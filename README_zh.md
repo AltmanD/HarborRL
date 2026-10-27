@@ -25,6 +25,8 @@
 
 ## News
 
+- **2026-10-26** 新增[离线配置向导](docs/configuration-wizard.md)和[本地 Web 控制台](docs/web-console.md)，支持配置、校验、dry-run、训练启动和日志查看。
+- **2026-10-26** 新增 [controller/GPU 部署配置](docs/deployment.md)、可选的 [OpenSandbox 执行能力](docs/sandbox-rollout.md)，以及按需启用的[训练与推理一致性检查](docs/train-inference-consistency.md)。
 - **10/2026** 📣📣📣 HarborRL released
 
 ## 项目介绍
@@ -42,6 +44,11 @@ HarborRL 支持 **Models × Algorithms × Tasks × Harnesses (MATH)** 的灵活�
 
 如果你希望让 AI agent 辅助完成本 repo 的部署和训练验证，请让它先阅读并严格遵循
 [docs/agents/environment-check.md](docs/agents/environment-check.md)。
+
+离线选项目录、交互式配置和 answer-file 配置方式见[配置 CLI 指南](docs/configuration-wizard.md)。
+可以从 `harborrl options` 或 `harborrl init --help` 开始。
+运行 `harborrl web` 可打开本地浏览器控制台，完成配置、校验、dry-run、训练启动和日志查看；
+远程访问与生命周期说明见 [Web 控制台指南](docs/web-console.md)。
 
 推荐的实际操作流程是把下面这段提示词交给 agent，并把尖括号内容替换成你的机器信息：
 
@@ -72,6 +79,10 @@ doctor 和 launch_native --dry-run。
 5. agent 必须等待用户明确同意后才能启动真实训练。
 
 ## 快速开始
+
+默认 CPU 安装不需要 Sandbox SDK 或集群账号。
+controller 与 GPU 的部署方式见[部署指南](docs/deployment.md)，可选的标准 OpenSandbox 执行方式见[Sandbox rollout 指南](docs/sandbox-rollout.md)。
+独立安装的 [H-cluster 实践包](practices/h_cluster/README.md)提供 Brainbox 部署与受限网络中继示例。
 
 ### 安装
 

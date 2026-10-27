@@ -221,6 +221,46 @@ def test_pure_clipped_loss_numerics():
     assert LOSS_SCALE_CORRECTION == 1.0
 
 
+def test_postprocess_accepts_multiple_groups_and_partial_actor_shards(tmp_path):
+    args = SimpleNamespace(n_samples_per_prompt=2)
+    groups = native_groups(tmp_path)
+    batch = export_training_batch(groups, rollout_ids=[10, 11])
+    data = convert_samples_to_train_data(args, fake_samples(batch, groups))
+    rollout_data_postprocess(args, 0, data)
+    shard = {key: values[::2] for key, values in data.items()}
+    rollout_data_postprocess(args, 0, shard)
+
+
+def test_postprocess_rejects_individual_group_overweight():
+    args = SimpleNamespace(n_samples_per_prompt=2)
+    data = {
+        "tokens": [[1, 2]] * 4,
+        "response_lengths": [1] * 4,
+        "rewards": [0.0] * 4,
+        "raw_reward": [0.0] * 4,
+        "truncated": [0] * 4,
+        "sample_indices": list(range(4)),
+        "rollout_ids": [10, 10, 10, 11],
+        "loss_masks": [[1]] * 4,
+        "rollout_log_probs": [[-0.2]] * 4,
+        "rollout_mask_sums": [1, 1, 1, 2],
+    }
+    # Total weight is below two, but group 10 exceeds its own budget.
+    with pytest.raises(ValueError, match="budget.*10"):
+        rollout_data_postprocess(args, 0, data)
+
+
+@pytest.mark.parametrize("group_id", [-1, 0.5, float("nan"), "invalid"])
+def test_postprocess_rejects_invalid_group_id(tmp_path, group_id):
+    args = SimpleNamespace(n_samples_per_prompt=2)
+    groups = native_groups(tmp_path)
+    batch = export_training_batch(groups, rollout_ids=[10, 11])
+    data = convert_samples_to_train_data(args, fake_samples(batch, groups))
+    data["rollout_ids"][0] = group_id
+    with pytest.raises(ValueError, match="rollout id"):
+        rollout_data_postprocess(args, 0, data)
+
+
 def test_postprocess_rejects_drift():
     args = SimpleNamespace(n_samples_per_prompt=2)
     base = {
@@ -265,7 +305,7 @@ def test_postprocess_accepts_tensor_like_scalars():
         "raw_reward": [Scalar()],
         "truncated": [IntegerScalar()],
         "sample_indices": [0],
-        "rollout_ids": [0],
+        "rollout_ids": [IntegerScalar()],
         "loss_masks": [[1]],
         "rollout_log_probs": [[Scalar()]],
         "rollout_mask_sums": [IntegerScalar()],
@@ -402,3 +442,45 @@ def test_export_package_has_no_backend_imports():
             else:
                 continue
             assert not (names & forbidden), f"{path} imports backend dependencies: {names & forbidden}"
+
+
+@pytest.mark.parametrize('group_index, expected_advantages, expected_counts', [
+    (0, [-0.5 / 0.500001, 0.5 / 0.500001], [2, 6]),
+    (1, [0.0, 0.0], [4, 2]),
+])
+def test_legacy_export_preserves_grpo_record_semantics(
+    tmp_path, group_index, expected_advantages, expected_counts,
+):
+    from harborrl.rollout.exporters.native import export_group
+    group = native_groups(tmp_path)[group_index]
+    exported = export_group(group, 2)
+    assert exported['export_version'] == 'native-grpo-v2'
+    assert exported['advantages'] == expected_advantages
+    assert exported['reduction'] == 'sum_token_weighted_loss; no secondary whitening'
+    assert exported['synthetic'] is False
+    for ir, advantage, count in zip(group, expected_advantages, expected_counts):
+        records = [record for record in exported['records']
+                   if record['identity']['trajectory_id'] == ir['identity']['trajectory_id']]
+        assert len(records) == len(ir['turns'])
+        for index, (turn, record) in enumerate(zip(ir['turns'], records)):
+            n = len(turn['output_ids'])
+            assert record == {
+                'identity': ir['identity'], 'turn_index': index,
+                'tokens': turn['input_ids'] + turn['output_ids'],
+                'prompt_length': len(turn['input_ids']), 'response_length': n,
+                'loss_mask': [0] * len(turn['input_ids']) + [1] * n,
+                'old_logprobs': turn['logprobs'], 'advantages': [advantage] * n,
+                'token_weights': [1.0 / (2 * count)] * n,
+                'training_reward': ir['evaluation']['training_reward'], 'padding': False,
+            }
+
+
+def test_native_task_inspection_avoids_legacy_conversion_imports():
+    import subprocess
+    import sys
+    code = (
+        'import sys; import harborrl.data.harbor.native_inspector; '
+        'assert "harborrl.data.harbor.inspector" not in sys.modules; '
+        'assert "harborrl.data.harbor.materializer" not in sys.modules'
+    )
+    subprocess.run([sys.executable, '-c', code], check=True)
