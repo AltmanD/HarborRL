@@ -12,7 +12,7 @@ from harborrl.rollout.harbor_job.bindings import claude_config, sanitized_runner
 from harborrl.rollout.harbor_job.coordinator import GroupSlots, run_attempt
 from harborrl.trajectories.native import RewardProfile
 
-PROFILE = {"cli_version": "2.1.0", "model": "policy", "max_turns": 4,
+PROFILE = {"cli_version": "2.1.141", "model": "policy", "max_turns": 4,
            "agent_timeout_sec": 60, "setup_timeout_sec": 60, "verifier_timeout_sec": 60}
 
 
@@ -39,11 +39,16 @@ def test_profile_controls_reach_agent_and_host():
     disabled = claude_config({**PROFILE, "disallowed_tools": "Agent,Task,WebSearch,WebFetch"},
                              "http://gateway:8000", "token")
     assert disabled["kwargs"]["disallowed_tools"] == "Agent,Task,WebSearch,WebFetch"
-    assert config["env"]["DISABLE_AUTO_COMPACT"] == "1"
+    extended = claude_config({**PROFILE, "disallowed_tools": "WebSearch"},
+                             "http://gateway:8000", "token")
+    assert extended["kwargs"]["disallowed_tools"] == "Agent,Task,WebSearch"
+    for key in ("DISABLE_PROMPT_CACHING", "DISABLE_COMPACT", "DISABLE_AUTO_COMPACT"):
+        assert config["env"][key] == "1"
+        assert sanitized_runner_env({key: "0"})[key] == "1"
     assert config["env"]["ANTHROPIC_MODEL"] == "policy"
     assert config["env"]["NO_PROXY"] == "gateway"
     assert config["env"]["no_proxy"] == "gateway"
-    assert config["kwargs"]["version"] == "2.1.0"
+    assert config["kwargs"]["version"] == "2.1.141"
     assert sanitized_runner_env({"PATH": "/bin", "ANTHROPIC_API_KEY": "external", "HTTPS_PROXY": "external"})["PATH"] == "/bin"
     assert "ANTHROPIC_API_KEY" not in sanitized_runner_env({"ANTHROPIC_API_KEY": "external"})
     with pytest.raises(ValueError):

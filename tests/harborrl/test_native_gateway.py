@@ -15,6 +15,7 @@ from harborrl.gateway.messages import (
 from harborrl.gateway.server import Gateway, make_server
 from harborrl.gateway.trace import TraceRegistry
 from harborrl.rollout.harbor_job.audit import audit_session
+from harborrl.trajectories.native import digest
 
 
 def payload(**changes):
@@ -42,11 +43,29 @@ def setup(tmp_path):
 
 @pytest.mark.parametrize("change", [{"model": "external"}, {"thinking": {"type": "enabled"}},
     {"temperature": .7}, {"top_p": .9}, {"top_k": 1}, {"max_tokens": True}, {"stream": 1},
+    {"temperature": True}, {"top_p": True}, {"temperature": "1"}, {"top_p": "1"},
+    {"temperature": float("nan")}, {"top_p": float("inf")},
     {"messages": []}, {"messages": [{"role": "assistant", "content": [{"type": "image"}]}]},
     {"tool_choice": {"type": "any"}}])
 def test_unsupported_request(change):
     with pytest.raises(ProtocolError):
         convert(payload(**change), model="policy")
+
+
+@pytest.mark.parametrize("temperature", [1, 1.0], ids=["int", "float"])
+@pytest.mark.parametrize("top_p", [1, 1.0], ids=["int", "float"])
+def test_equivalent_sampling_numbers_share_attempt_lock(tmp_path, temperature, top_p):
+    registry, ident, token, gateway = setup(tmp_path)
+    aid, message = gateway.generate(token, payload(temperature=temperature, top_p=top_p))
+    registry.delivery(aid, message["id"], "sent")
+    registry.consume(aid, message["id"], message["content"], "session")
+    registry.close(aid)
+    turns, seal = registry.seal(aid)
+    assert seal["errors"] == []
+    assert digest(turns[0]["sampling"]) == ident.sampling_digest
+    for key, value in (("temperature", temperature), ("top_p", top_p)):
+        assert type(turns[0]["sampling"][key]) is float
+        assert type(turns[0]["client_request"][key]) is type(value)
 
 
 def test_tool_roundtrip():

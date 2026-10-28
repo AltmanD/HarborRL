@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 
 from harborrl.rollout.exporters.native import export_group
 from harborrl.rollout.runtime import run_group
-from harborrl.trajectories.native import digest, finite, publish, read_json
+from harborrl.trajectories.native import canonical_sampling, digest, finite, publish, read_json
 
 SERVICE_SCHEMA = "harborrl-rollout-service-v1"
 GROUP_REQUEST_KEYS = {"group_id", "rollout_id", "group_index", "policy_version",
@@ -147,7 +147,7 @@ async def default_executor(config, runtime_, request):
     """The production executor: the framework-free rollout core."""
     return await run_group(
         config, runtime_, entry=request["task"], group_index=request["group_index"],
-        rollout_id=request["rollout_id"], sampling_digest=digest(request["sampling"]),
+        rollout_id=request["rollout_id"], sampling_digest=digest(canonical_sampling(request["sampling"])),
         policy_version=request["policy_version"], group_size=len(request["slots"]))
 
 

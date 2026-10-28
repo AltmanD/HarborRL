@@ -19,6 +19,7 @@ def claude_config(profile, gateway_url, credential, max_output_tokens=8192):
     if not isinstance(disallowed_tools, str) or not re.fullmatch(
             r"[A-Za-z][A-Za-z0-9_]*(?:,[A-Za-z][A-Za-z0-9_]*)*", disallowed_tools):
         raise ValueError("disallowed tools must be a comma-separated identifier list")
+    disallowed_tools = ",".join(dict.fromkeys(["Agent", "Task", *disallowed_tools.split(",")]))
     url = urlsplit(gateway_url)
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment or url.path not in ("", "/"):
         raise ValueError("Anthropic base URL must be a plain origin (no /v1 suffix)")
@@ -43,9 +44,11 @@ def claude_config(profile, gateway_url, credential, max_output_tokens=8192):
 
 def client_controls():
     """Pass controls into the Agent environment, not only the Runner host."""
+    # Disabling prompt caching also prevents cache-warming model requests.
     return {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "DISABLE_PROMPT_CACHING": "1", "DISABLE_COMPACT": "1",
             "DISABLE_AUTOUPDATER": "1", "DISABLE_AUTO_COMPACT": "1"}
 
 
