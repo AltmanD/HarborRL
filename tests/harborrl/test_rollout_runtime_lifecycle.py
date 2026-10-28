@@ -110,7 +110,8 @@ def test_embedded_shutdown_awaits_tasks_before_closing_gateway(monkeypatch):
     assert runtime._RUNTIME is None and runtime._EMBEDDED_LOOP is None
 
 
-def test_embedded_failure_waits_for_other_groups_and_releases_loop(monkeypatch):
+@pytest.mark.parametrize("error_type", [ValueError, asyncio.CancelledError])
+def test_embedded_failure_waits_for_other_groups_and_releases_loop(monkeypatch, error_type):
     from harborrl.backends.slime_v032 import rollout
 
     runtime.close_runtime()
@@ -119,7 +120,7 @@ def test_embedded_failure_waits_for_other_groups_and_releases_loop(monkeypatch):
     async def generate(args, group, params, *, rollout_id):
         if group == "failed":
             await asyncio.sleep(.01)
-            raise ValueError("original group error")
+            raise error_type("original group error")
         try:
             await asyncio.sleep(60)
         finally:
@@ -128,7 +129,7 @@ def test_embedded_failure_waits_for_other_groups_and_releases_loop(monkeypatch):
 
     monkeypatch.delenv("HARBORRL_ROLLOUT_SERVICE_URL", raising=False)
     monkeypatch.setattr(rollout, "generate_group", generate)
-    with pytest.raises(ValueError, match="original group error"):
+    with pytest.raises(error_type, match="original group error"):
         runtime.run_embedded(rollout.run_native_groups(
             SimpleNamespace(rollout_max_response_len=128), ["failed", "pending"], None, 0))
     assert events == ["sibling cleaned"]

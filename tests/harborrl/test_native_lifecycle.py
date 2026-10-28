@@ -124,11 +124,15 @@ sys.stdin.readline()
     assert registry.attempts[identity().attempt_id]["closed"]
     assert (root / "failure.json").is_file()
     if mode != "wrong-event":
-        assert (root / "cleanup-required.json").is_file()
+        marker = json.loads((root / "cleanup-required.json").read_text())
+        assert marker["identity"] == identity().to_dict()
+        assert marker["trial_id"] == "trial"
+        assert marker["runner_host"] is None
     assert json.loads((root / "runner-events.json").read_text())[0]["type"] == "prepared"
 
 
-def test_cleanup_timeout_preserves_runner_marker_and_original_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize("runner_host", [None, "runner-host"])
+def test_cleanup_timeout_preserves_runner_marker_and_original_error(tmp_path, monkeypatch, runner_host):
     worker = tmp_path / "worker.py"
     worker.write_text('''import json, sys, time
 from pathlib import Path
@@ -152,10 +156,12 @@ time.sleep(30)
         asyncio.run(run_attempt(identity(), task_path=tmp_path, profile=PROFILE,
             gateway_url="http://gateway", runner_python=sys.executable, root=root,
             registry=TraceRegistry(tmp_path / "traces"), reward_profile=RewardProfile(),
-            timeout=2, cleanup_timeout=.1))
+            timeout=2, cleanup_timeout=.1, runner_host=runner_host))
     marker = json.loads((root / "cleanup-required.json").read_text())
     assert marker["reason"] == "Inspect runner/cleanup-required.json"
-    assert marker["runner_host"] is None
+    assert marker["identity"] == identity().to_dict()
+    assert marker["trial_id"] == "trial"
+    assert marker["runner_host"] == runner_host
     assert json.loads((root / "failure.json").read_text())["error_type"] == "ValueError"
     assert (root / "runner-events.json").is_file()
 

@@ -451,6 +451,18 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
     raise RuntimeError(f"native slot {slot} exhausted its retry budget") from last_error
 
 
+async def gather_or_cancel(coroutines):
+    """Return ordered results, awaiting sibling cleanup before propagating failure."""
+    tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def run_group(config, runtime_, *, entry, group_index, rollout_id,
                     sampling_digest, policy_version, group_size=None):
     """Execute one complete group and return per-slot IRs in slot order."""
@@ -458,14 +470,6 @@ async def run_group(config, runtime_, *, entry, group_index, rollout_id,
     slots, reward_profile = _group_slots(
         config, runtime_, group_index, rollout_id, entry,
         sampling_digest, policy_version, size)
-    tasks = [asyncio.create_task(
-        _run_slot(config, runtime_, slots, slot, entry, reward_profile))
-        for slot in range(size)
-    ]
-    try:
-        return list(await asyncio.gather(*tasks))
-    except BaseException:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
+    return await gather_or_cancel(
+        _run_slot(config, runtime_, slots, slot, entry, reward_profile)
+        for slot in range(size))

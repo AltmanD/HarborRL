@@ -18,8 +18,9 @@ from harborrl.rollout.runtime import (
     RolloutRuntimeConfig,
     current_policy_version,
     digest,
-    run_group,
+    gather_or_cancel,
     run_embedded,
+    run_group,
     runtime,
     task_entry,
 )
@@ -195,15 +196,8 @@ async def run_native_groups(args, groups, policy_version, rollout_id):
         ir_groups = await run_service_groups(args, groups, rollout_id)
         assert_locked_policy_versions(ir_groups, policy_version)
         return ir_groups
-    pending = [asyncio.create_task(
-        generate_group(args, group, params, rollout_id=rollout_id)) for group in groups]
-    try:
-        results = await asyncio.gather(*pending)
-    except BaseException:
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        raise
+    results = await gather_or_cancel(
+        generate_group(args, group, params, rollout_id=rollout_id) for group in groups)
     ir_groups = []
     for group in results:
         trajectories = []
