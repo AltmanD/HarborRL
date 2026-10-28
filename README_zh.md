@@ -108,9 +108,13 @@ uv run pytest
 如需原生训练，请把固定版本的 native 训练栈安装到可写位置：
 
 ```bash
-bash scripts/bootstrap_backends.sh <Path to HarborRL backends>
-. <Path to HarborRL backends>/harborrl-backend.env
+bash scripts/bootstrap_backends.sh "<Path to HarborRL backends>"
+. "<Path to HarborRL backends>/harborrl-backend.env"
 ```
+
+生成的文件会将 `SLIME_DIR`、`MEGATRON_DIR` 和 `SGLANG_IMAGE` 导出给子进程。
+对于旧版 bootstrap 脚本生成的文件，请在 source 前执行 `set -a`，之后执行 `set +a`。
+清理标记的恢复步骤和无 GPU 回归命令见[rollout 生命周期与恢复](docs/rollout-runtime-lifecycle.md)。
 
 ### 训练
 

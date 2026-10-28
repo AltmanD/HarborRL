@@ -9,7 +9,9 @@ pipeline enforced them.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
+import logging
 import secrets
 import threading
 from contextlib import nullcontext
@@ -21,6 +23,31 @@ from harborrl.rollout.harbor_job.coordinator import GroupSlots, run_attempt
 from harborrl.trajectories.native import Identity, RewardProfile, digest, read_json
 
 TASK_ENTRY_KEYS = {"id", "revision", "path", "task_digest", "reward_profile"}
+
+
+class RuntimeLifecycleError(RuntimeError):
+    """An async resource was used outside its owning runtime lifecycle."""
+
+
+class CleanupRequiredError(RuntimeError):
+    """Harbor resources must be inspected before admitting more attempts."""
+
+
+class CleanupAdmission:
+    def __init__(self, root):
+        self.markers = set(Path(root).rglob("cleanup-required.json"))
+
+    def observe(self, root):
+        self.markers.update(Path(root).rglob("cleanup-required.json"))
+
+    def check(self):
+        self.markers = {path for path in self.markers if path.exists()}
+        if self.markers:
+            paths = ", ".join(str(path) for path in sorted(self.markers))
+            raise CleanupRequiredError(
+                "rollout cleanup unresolved; automatic retry blocked. "
+                "Inspect Harbor resources, then remove resolved cleanup-required.json "
+                f"markers before resuming: {paths}")
 
 
 @dataclass(frozen=True)
@@ -155,6 +182,9 @@ class RolloutRuntime:
         self.profile = read_json(config.profile_path)
         self.rollout_root = self.run_root / "native-rollouts"
         self.rollout_root.mkdir(parents=True, exist_ok=True)
+        self.cleanup = CleanupAdmission(self.rollout_root)
+        self.cleanup.check()
+        self._loop = None
         self.registry = TraceRegistry(self.run_root / "native-traces")
         self.semaphore = asyncio.Semaphore(config.concurrency_limit)
         if config.sandbox:
@@ -176,6 +206,13 @@ class RolloutRuntime:
         self.server = make_server(gateway, host=config.gateway_host,
                                   port=config.gateway_port)
         self._start_gateway()
+
+    def check_event_loop(self):
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif self._loop is not loop:
+            raise RuntimeLifecycleError("rollout runtime belongs to a different event loop")
 
     def _start_gateway(self):
         self.thread = threading.Thread(
@@ -200,21 +237,53 @@ class RolloutRuntime:
 NativeRolloutRuntime = RolloutRuntime
 
 _RUNTIME = None
-_RUNTIME_LOCK = asyncio.Lock()
+_RUNTIME_LOCK = threading.RLock()
+_EMBEDDED_LOCK = threading.RLock()
+_EMBEDDED_LOOP = None
+_EMBEDDED_THREAD = None
 
 
 async def runtime(config, *, tokenizer=None, tokenizer_loader=None):
     """Process-wide runtime cache for the embedded GPU-side rollout path."""
     global _RUNTIME
-    if _RUNTIME is None:
-        async with _RUNTIME_LOCK:
-            if _RUNTIME is None:
-                if tokenizer is None:
-                    if tokenizer_loader is None:
-                        raise ValueError("runtime requires a tokenizer or a loader")
-                    tokenizer = tokenizer_loader()
-                _RUNTIME = RolloutRuntime(config, tokenizer)
-    return _RUNTIME
+    with _RUNTIME_LOCK:
+        if _RUNTIME is None:
+            if tokenizer is None:
+                if tokenizer_loader is None:
+                    raise ValueError("runtime requires a tokenizer or a loader")
+                tokenizer = tokenizer_loader()
+            _RUNTIME = RolloutRuntime(config, tokenizer)
+        elif _RUNTIME.config != config:
+            raise RuntimeLifecycleError("close the cached rollout runtime before changing its configuration")
+        _RUNTIME.check_event_loop()
+        return _RUNTIME
+
+
+def run_embedded(coroutine):
+    """Run successive synchronous rollout calls on one Python 3.10-compatible loop."""
+    global _EMBEDDED_LOOP, _EMBEDDED_THREAD
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        coroutine.close()
+        raise RuntimeLifecycleError("synchronous rollout cannot run inside an active event loop")
+    with _EMBEDDED_LOCK:
+        if _EMBEDDED_LOOP is None:
+            _EMBEDDED_LOOP = asyncio.new_event_loop()
+            _EMBEDDED_THREAD = threading.get_ident()
+        elif _EMBEDDED_THREAD != threading.get_ident():
+            coroutine.close()
+            raise RuntimeLifecycleError("embedded rollout must stay on its owning thread")
+        try:
+            return _EMBEDDED_LOOP.run_until_complete(coroutine)
+        except BaseException:
+            try:
+                close_runtime()
+            except Exception:
+                logging.getLogger(__name__).exception("embedded rollout shutdown failed")
+            raise
 
 
 def publish_native_version(runtime_, states, expected):
@@ -234,10 +303,46 @@ def current_policy_version(runtime_):
 
 
 def close_runtime():
-    global _RUNTIME
-    if _RUNTIME is not None:
-        _RUNTIME.close()
-        _RUNTIME = None
+    """Drain embedded tasks, close the gateway, then release the owning loop."""
+    global _RUNTIME, _EMBEDDED_LOOP, _EMBEDDED_THREAD
+    with _EMBEDDED_LOCK:
+        loop = _EMBEDDED_LOOP
+        if loop is not None and loop.is_running():
+            raise RuntimeLifecycleError("close embedded rollout between calls")
+        if loop is not None:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeLifecycleError("close embedded rollout outside an active event loop")
+
+        async def cancel_pending():
+            pending = asyncio.all_tasks() - {asyncio.current_task()}
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        try:
+            if loop is not None:
+                loop.run_until_complete(cancel_pending())
+            with _RUNTIME_LOCK:
+                cached, _RUNTIME = _RUNTIME, None
+                try:
+                    if cached is not None:
+                        cached.close()
+                finally:
+                    if loop is not None:
+                        loop.run_until_complete(loop.shutdown_asyncgens())
+                        loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            if loop is not None:
+                loop.close()
+            _EMBEDDED_LOOP = None
+            _EMBEDDED_THREAD = None
+
+
+atexit.register(close_runtime)
 
 
 def task_entry(sample):
@@ -291,6 +396,14 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
     """Execute one slot with the group's shared identity and retry bookkeeping."""
     workers = config.workers
     overrides = config.task_worker_overrides
+    check_loop = getattr(runtime_, "check_event_loop", None)
+    if check_loop is not None:
+        check_loop()
+    if not hasattr(runtime_, "cleanup"):
+        runtime_.cleanup = CleanupAdmission(runtime_.rollout_root)
+    cleanup = runtime_.cleanup
+    cleanup.check()
+    last_error = None
     for attempt_index in range(slots.max_attempts):
         identity = slots.start(str(slot))
         runner_host = overrides.get(entry["id"])
@@ -307,27 +420,35 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
             admission = runtime_.sandbox_admission.lease(task_binding(config.sandbox, entry['path']), root)
         try:
             async with admission, runtime_.semaphore:
-                ir = await run_attempt(
-                    identity,
-                    task_path=entry["path"],
-                    profile=runtime_.profile,
-                    gateway_url=config.gateway_url,
-                    runner_python=config.runner_python,
-                    runner_host=runner_host,
-                    root=root,
-                    registry=runtime_.registry,
-                    reward_profile=reward_profile,
-                    max_output_tokens=config.max_output_tokens,
-                    **({'sandbox': config.sandbox} if config.sandbox else {}),
-                )
+                cleanup.check()
+                try:
+                    ir = await run_attempt(
+                        identity,
+                        task_path=entry["path"],
+                        profile=runtime_.profile,
+                        gateway_url=config.gateway_url,
+                        runner_python=config.runner_python,
+                        runner_host=runner_host,
+                        root=root,
+                        registry=runtime_.registry,
+                        reward_profile=reward_profile,
+                        max_output_tokens=config.max_output_tokens,
+                        **({'sandbox': config.sandbox} if config.sandbox else {}),
+                    )
+                finally:
+                    cleanup.observe(root)
+                cleanup.check()
+        except (CleanupRequiredError, RuntimeLifecycleError) as exc:
+            slots.finish(str(slot), error=f"{type(exc).__name__}: {exc}")
+            raise
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError) as exc:
             slots.finish(str(slot), error=f"{type(exc).__name__}: {exc}")
-            if config.sandbox and ((root / 'cleanup-required.json').exists() or runtime_.sandbox_admission.blocked):
-                raise RuntimeError('sandbox cleanup unresolved; automatic retry blocked') from exc
+            cleanup.check()
+            last_error = exc
             continue
         slots.finish(str(slot), ir)
         return ir
-    raise RuntimeError(f"native slot {slot} exhausted its retry budget")
+    raise RuntimeError(f"native slot {slot} exhausted its retry budget") from last_error
 
 
 async def run_group(config, runtime_, *, entry, group_index, rollout_id,

@@ -73,14 +73,18 @@ def test_coordinator_publishes_complete_success(tmp_path, monkeypatch, empty):
         return await spawn(sys.executable, "-S", str(worker), **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    registry = Registry(tmp_path / "trace")
     ir = asyncio.run(run_attempt(
         ident, task_path=tmp_path, profile=PROFILE, gateway_url="http://gateway",
-        runner_python=sys.executable, root=root, registry=Registry(tmp_path / "trace"),
+        runner_python=sys.executable, root=root, registry=registry,
         reward_profile=RewardProfile()))
     assert ir["readiness"] == "CONTRACT_READY"
     assert json.loads((root / "trajectory.v2.json").read_text()) == ir
     assert (root / "evaluation.json").is_file()
     assert not (root / "cleanup-required.json").exists()
+    assert not (root / "trace-unsealed.json").exists()
+    assert registry.attempts[ident.attempt_id]["turns"] == []
+    assert registry.seal(ident.attempt_id) == (ir["turns"], ir["trace_seal"])
     assert all(turn["delivery"] == "consumed_confirmed" for turn in ir["turns"])
 
 

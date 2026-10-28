@@ -146,6 +146,9 @@ PARALLEL_ARGS=(
   --attention-backend flash
   --no-gradient-accumulation-fusion
 )
+if [[ "${HARBORRL_GPU_LAYOUT:-split}" == "colocate" ]]; then
+  PARALLEL_ARGS+=(--colocate)
+fi
 
 CUSTOM_ARGS=(
   --rollout-function-path harborrl.backends.slime_v032.rollout.generate_rollout

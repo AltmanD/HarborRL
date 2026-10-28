@@ -28,14 +28,15 @@ clone_pinned() {
 need git
 need docker
 mkdir -p "$PREFIX"
+PREFIX="$(cd "$PREFIX" && pwd)"
 clone_pinned "$SLIME_REPO" "$PREFIX/slime" "$SLIME_COMMIT"
 clone_pinned "$MEGATRON_REPO" "$PREFIX/Megatron-LM" "$MEGATRON_COMMIT"
 docker pull "$SGLANG_IMAGE"
 
-cat >"$PREFIX/harborrl-backend.env" <<ENV
-SLIME_DIR=$PREFIX/slime
-MEGATRON_DIR=$PREFIX/Megatron-LM
-SGLANG_IMAGE=$SGLANG_IMAGE
-ENV
+{
+  printf 'export SLIME_DIR=%q\n' "$PREFIX/slime"
+  printf 'export MEGATRON_DIR=%q\n' "$PREFIX/Megatron-LM"
+  printf 'export SGLANG_IMAGE=%q\n' "$SGLANG_IMAGE"
+} >"$PREFIX/harborrl-backend.env"
 
 echo "Bootstrap complete. Source $PREFIX/harborrl-backend.env before doctor."

@@ -16,10 +16,10 @@ from harborrl.backends.slime_v032.versions import lock_policy_version
 from harborrl.export.native import export_training_batch
 from harborrl.rollout.runtime import (
     RolloutRuntimeConfig,
-    close_runtime,
     current_policy_version,
     digest,
     run_group,
+    run_embedded,
     runtime,
     task_entry,
 )
@@ -195,12 +195,14 @@ async def run_native_groups(args, groups, policy_version, rollout_id):
         ir_groups = await run_service_groups(args, groups, rollout_id)
         assert_locked_policy_versions(ir_groups, policy_version)
         return ir_groups
+    pending = [asyncio.create_task(
+        generate_group(args, group, params, rollout_id=rollout_id)) for group in groups]
     try:
-        results = await asyncio.gather(*(
-            generate_group(args, group, params, rollout_id=rollout_id) for group in groups
-        ))
+        results = await asyncio.gather(*pending)
     except BaseException:
-        close_runtime()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         raise
     ir_groups = []
     for group in results:
@@ -309,7 +311,7 @@ def generate_rollout(
     if runner is None:
         async def runner(args_, groups_, policy_version):
             return await run_native_groups(args_, groups_, policy_version, rollout_id)
-    ir_groups = asyncio.run(runner(args, groups, None))
+    ir_groups = run_embedded(runner(args, groups, None))
     policy_version = lock_policy_version(args)
     assert_locked_policy_versions(ir_groups, policy_version)
     batch = export_training_batch(

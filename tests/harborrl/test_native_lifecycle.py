@@ -128,6 +128,38 @@ sys.stdin.readline()
     assert json.loads((root / "runner-events.json").read_text())[0]["type"] == "prepared"
 
 
+def test_cleanup_timeout_preserves_runner_marker_and_original_error(tmp_path, monkeypatch):
+    worker = tmp_path / "worker.py"
+    worker.write_text('''import json, sys, time
+from pathlib import Path
+req = json.loads(sys.stdin.readline())
+print(json.dumps({"type": "prepared", "trial_id": "trial"}), flush=True)
+sys.stdin.readline()
+output = Path(req["output"])
+output.mkdir(parents=True)
+(output / "cleanup-required.json").write_text('{"reason": "deletion failed"}')
+print(json.dumps({"type": "event", "trial_id": "other"}), flush=True)
+time.sleep(30)
+''')
+    spawn = asyncio.create_subprocess_exec
+
+    async def fake_spawn(*args, **kwargs):
+        return await spawn(sys.executable, "-S", str(worker), **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    root = tmp_path / "attempt"
+    with pytest.raises(ValueError, match="event trial identity mismatch"):
+        asyncio.run(run_attempt(identity(), task_path=tmp_path, profile=PROFILE,
+            gateway_url="http://gateway", runner_python=sys.executable, root=root,
+            registry=TraceRegistry(tmp_path / "traces"), reward_profile=RewardProfile(),
+            timeout=2, cleanup_timeout=.1))
+    marker = json.loads((root / "cleanup-required.json").read_text())
+    assert marker["reason"] == "Inspect runner/cleanup-required.json"
+    assert marker["runner_host"] is None
+    assert json.loads((root / "failure.json").read_text())["error_type"] == "ValueError"
+    assert (root / "runner-events.json").is_file()
+
+
 def test_offline_http_to_export_is_explicitly_synthetic(tmp_path):
     from harborrl.rollout.harbor_job.offline import smoke
     from harborrl.trajectories.native import require_ready
