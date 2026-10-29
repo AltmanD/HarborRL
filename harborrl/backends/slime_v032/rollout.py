@@ -16,26 +16,28 @@ from harborrl.backends.slime_v032.versions import lock_policy_version
 from harborrl.export.native import export_training_batch
 from harborrl.rollout.runtime import (
     RolloutRuntimeConfig,
-    close_runtime,
     current_policy_version,
     digest,
+    gather_or_cancel,
+    run_embedded,
     run_group,
     runtime,
     task_entry,
 )
+from harborrl.trajectories.native import canonical_sampling
 
 
 def sampling_params(args):
     max_new_tokens = getattr(args, "rollout_max_response_len", None)
     if type(max_new_tokens) is not int or max_new_tokens < 1:
         raise ValueError("native rollout requires a positive rollout_max_response_len")
-    return {
+    return canonical_sampling({
         "temperature": getattr(args, "rollout_temperature", 1.0),
         "top_p": getattr(args, "rollout_top_p", 1.0),
         "top_k": getattr(args, "rollout_top_k", -1),
         "max_new_tokens": max_new_tokens,
         "stop": list(getattr(args, "rollout_stop", None) or []),
-    }
+    })
 
 
 def runtime_config_from_args(args):
@@ -91,13 +93,13 @@ async def generate_group(args, group, sampling_params_, rollout_id, evaluation=F
     if report["status"] != "NEEDS_PROBE":
         raise ValueError(f"native task preflight failed: {report['reasons']}")
     stop = list(sampling_params_.get("stop") or [])
-    sampling_digest = digest({
+    sampling_digest = digest(canonical_sampling({
         "temperature": sampling_params_.get("temperature"),
         "top_p": sampling_params_.get("top_p"),
         "top_k": sampling_params_.get("top_k"),
         "max_new_tokens": sampling_params_.get("max_new_tokens"),
         "stop": stop,
-    })
+    }))
     config = runtime_config_from_args(args)
     runtime_ = await runtime(config, tokenizer_loader=slime_tokenizer_loader(args))
     policy_version = current_policy_version(runtime_)
@@ -195,13 +197,8 @@ async def run_native_groups(args, groups, policy_version, rollout_id):
         ir_groups = await run_service_groups(args, groups, rollout_id)
         assert_locked_policy_versions(ir_groups, policy_version)
         return ir_groups
-    try:
-        results = await asyncio.gather(*(
-            generate_group(args, group, params, rollout_id=rollout_id) for group in groups
-        ))
-    except BaseException:
-        close_runtime()
-        raise
+    results = await gather_or_cancel(
+        generate_group(args, group, params, rollout_id=rollout_id) for group in groups)
     ir_groups = []
     for group in results:
         trajectories = []
@@ -309,7 +306,7 @@ def generate_rollout(
     if runner is None:
         async def runner(args_, groups_, policy_version):
             return await run_native_groups(args_, groups_, policy_version, rollout_id)
-    ir_groups = asyncio.run(runner(args, groups, None))
+    ir_groups = run_embedded(runner(args, groups, None))
     policy_version = lock_policy_version(args)
     assert_locked_policy_versions(ir_groups, policy_version)
     batch = export_training_batch(

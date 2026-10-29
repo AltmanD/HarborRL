@@ -6,7 +6,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from harborrl.trajectories.native import digest, publish
+from harborrl.trajectories.native import digest, publish, read_json
 
 
 class TraceRegistry:
@@ -18,6 +18,11 @@ class TraceRegistry:
         self.credentials = {}
         self.accepting = True
         self.version = None
+
+    def _turns(self, state):
+        if state.get("sealed"):
+            return read_json(state["root"] / "trace.json")["turns"]
+        return state["turns"]
 
     def register(self, identity, trial_id, *, credential=None):
         with self.lock:
@@ -104,7 +109,7 @@ class TraceRegistry:
                     raise TimeoutError("policy delivery acknowledgement still pending")
                 self.changed.wait(remaining)
             if any(turn.get("delivery") not in ("sent", "consumed_confirmed")
-                   for turn in state["turns"]):
+                   for turn in self._turns(state)):
                 raise ValueError("policy response delivery was not confirmed")
 
     def consume(self, aid, response_id, content, evidence_ref):
@@ -125,9 +130,10 @@ class TraceRegistry:
     def unconsumed_responses(self, aid):
         with self.lock:
             state = self.attempts[aid]
+            turns = self._turns(state)
             return [{"response_id": turn["response_id"], "content": deepcopy(turn["response"]["content"]),
-                     "finish_reason": turn.get("finish_reason"), "is_final": index == len(state["turns"]) - 1}
-                    for index, turn in enumerate(state["turns"]) if turn.get("delivery") != "consumed_confirmed"]
+                     "finish_reason": turn.get("finish_reason"), "is_final": index == len(turns) - 1}
+                    for index, turn in enumerate(turns) if turn.get("delivery") != "consumed_confirmed"]
 
     def close(self, aid):
         with self.lock:
@@ -138,6 +144,9 @@ class TraceRegistry:
     def seal(self, aid):
         with self.lock:
             state = self.attempts[aid]
+            if state["sealed"]:
+                record = read_json(state["root"] / "trace.json")
+                return record["turns"], record["seal"]
             if not state["closed"] or state["pending"]:
                 raise ValueError("close admission and drain requests before sealing")
             turns = deepcopy(state["turns"])
@@ -149,6 +158,9 @@ class TraceRegistry:
                     "turns_digest": digest(turns), "errors": sorted(set(errors))}
             publish(state["root"] / "trace.json", {"turns": turns, "seal": seal})
             state["sealed"] = True
+            # Keep only admission/identity bookkeeping after durable publication.
+            state["turns"].clear()
+            state["errors"].clear()
             return turns, seal
 
     def drain(self, timeout):

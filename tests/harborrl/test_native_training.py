@@ -146,10 +146,13 @@ def test_cli_command_mode_selects_experiment_dimensions(tmp_path, capsys, monkey
     ([], '0.0001'),
     (['training.learning_rate=0.000025'], '2.5e-05'),
 ])
-def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expected_lr):
+@pytest.mark.parametrize('layout', ['split', 'colocate'])
+def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expected_lr, layout):
     config_path, task = native_config(tmp_path)
     from harborrl.data.harbor.native_inspector import inspect_native
-    config = load_config(config_path, overrides)
+    total_gpus = '8' if layout == 'split' else '4'
+    config = load_config(config_path, [*overrides, f'deployment.layout={layout}',
+                                      f'deployment.num_gpus={total_gpus}'])
     catalog_path = Path(config['tasks']['catalog'])
     entries = json.loads(catalog_path.read_text())
     entries[0]['task_digest'] = inspect_native(task)['task_digest']
@@ -171,9 +174,9 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
         "HARNESS_OPTION": "native-claude-code", "HARBORRL_NATIVE_ROLLOUT": "1",
         "HARBORRL_SKIP_GLOBAL_CLEANUP": "1", "ROLLOUT_PROMPT_DATA": str(prompt),
         "HF_CKPT": "/model", "REF_LOAD": "/reference", "MODEL_ARGS_FILE": "qwen3-8B",
-        "MODEL_TAG": "qwen3-8B", "NUM_GPUS": "8", "ACTOR_GPUS": "4",
+        "MODEL_TAG": "qwen3-8B", "NUM_GPUS": total_gpus, "ACTOR_GPUS": "4",
         "ROLLOUT_GPUS": "4", "TP_SIZE": "4", "ROLLOUT_NUM_GPUS_PER_ENGINE": "4",
-        "HARBORRL_GPU_LAYOUT": "split", "NUM_ROLLOUT": "1", "SAVE_INTERVAL": "1",
+        "HARBORRL_GPU_LAYOUT": layout, "NUM_ROLLOUT": "1", "SAVE_INTERVAL": "1",
         "RUN_DIR": str(root), "RUN_ID": "run",
         "RUNS_ROOT": str(tmp_path), "CKPT_ROOT": str(root / "checkpoints"),
         "HARBORRL_NATIVE_MAX_ATTEMPTS": "2", "HARBORRL_NATIVE_DRAIN_TIMEOUT": "1",
@@ -200,7 +203,7 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
         '--num-rollout': '1', '--save-interval': '1',
         '--rollout-batch-size': '1', '--n-samples-per-prompt': '2',
         '--rollout-max-response-len': '128', '--rollout-max-context-len': '1024',
-        '--num-gpus-per-node': '8', '--actor-num-gpus-per-node': '4',
+        '--num-gpus-per-node': total_gpus, '--actor-num-gpus-per-node': '4',
         '--rollout-num-gpus': '4', '--tensor-model-parallel-size': '4',
         '--rollout-num-gpus-per-engine': '4', '--hf-checkpoint': '/model',
         '--ref-load': '/reference', '--prompt-data': str(prompt),
@@ -210,6 +213,7 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
         assert arguments[arguments.index(flag) + 1] == value
     recorded = json.loads(next((root / 'dry-run-commands').glob('*.json')).read_text())
     assert recorded['command'] == arguments
+    assert arguments.count('--colocate') == int(layout == 'colocate')
     assert recorded['mode'] == 'dry_run'
     for argument in (
         "--rollout-function-path harborrl.backends.slime_v032.rollout.generate_rollout",

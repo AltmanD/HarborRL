@@ -120,7 +120,12 @@ class SandboxAdmission:
     def __init__(self, cfg):
         self.total = asyncio.Semaphore(cfg['max_live_instances'])
         self.bindings = {b['image']: asyncio.Semaphore(b['max_live_instances']) for b in cfg['bindings']}
-        self.blocked = False
+        self.cleanup_markers = set()
+
+    @property
+    def blocked(self):
+        self.cleanup_markers = {path for path in self.cleanup_markers if path.exists()}
+        return bool(self.cleanup_markers)
 
     @asynccontextmanager
     async def lease(self, binding, root):
@@ -131,5 +136,4 @@ class SandboxAdmission:
             try:
                 yield
             finally:
-                if (Path(root) / 'cleanup-required.json').exists():
-                    self.blocked = True
+                self.cleanup_markers.update(Path(root).rglob('cleanup-required.json'))

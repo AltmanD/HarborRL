@@ -39,6 +39,7 @@ docs/agents/*
 !docs/configuration-wizard.md
 !docs/deployment.md
 !docs/sandbox-rollout.md
+!docs/rollout-runtime-lifecycle.md
 !docs/train-inference-consistency.md
 !docs/web-console.md
 practices/**/VALIDATION.md

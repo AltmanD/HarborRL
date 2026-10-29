@@ -15,6 +15,7 @@ from harborrl.gateway.messages import (
 from harborrl.gateway.server import Gateway, make_server
 from harborrl.gateway.trace import TraceRegistry
 from harborrl.rollout.harbor_job.audit import audit_session
+from harborrl.trajectories.native import digest
 
 
 def payload(**changes):
@@ -42,11 +43,29 @@ def setup(tmp_path):
 
 @pytest.mark.parametrize("change", [{"model": "external"}, {"thinking": {"type": "enabled"}},
     {"temperature": .7}, {"top_p": .9}, {"top_k": 1}, {"max_tokens": True}, {"stream": 1},
+    {"temperature": True}, {"top_p": True}, {"temperature": "1"}, {"top_p": "1"},
+    {"temperature": float("nan")}, {"top_p": float("inf")},
     {"messages": []}, {"messages": [{"role": "assistant", "content": [{"type": "image"}]}]},
     {"tool_choice": {"type": "any"}}])
 def test_unsupported_request(change):
     with pytest.raises(ProtocolError):
         convert(payload(**change), model="policy")
+
+
+@pytest.mark.parametrize("temperature", [1, 1.0], ids=["int", "float"])
+@pytest.mark.parametrize("top_p", [1, 1.0], ids=["int", "float"])
+def test_equivalent_sampling_numbers_share_attempt_lock(tmp_path, temperature, top_p):
+    registry, ident, token, gateway = setup(tmp_path)
+    aid, message = gateway.generate(token, payload(temperature=temperature, top_p=top_p))
+    registry.delivery(aid, message["id"], "sent")
+    registry.consume(aid, message["id"], message["content"], "session")
+    registry.close(aid)
+    turns, seal = registry.seal(aid)
+    assert seal["errors"] == []
+    assert digest(turns[0]["sampling"]) == ident.sampling_digest
+    for key, value in (("temperature", temperature), ("top_p", top_p)):
+        assert type(turns[0]["sampling"][key]) is float
+        assert type(turns[0]["client_request"][key]) is type(value)
 
 
 def test_tool_roundtrip():
@@ -93,13 +112,21 @@ def test_model_output_never_repaired(text):
         parse_qwen_output(text, response_id="m", tools=[])
 
 
-def test_trace_requires_actual_consumption_and_is_immutable(tmp_path):
+@pytest.mark.parametrize("delivery", ["sent", "delivery_unknown"])
+def test_trace_requires_actual_consumption_and_is_immutable(tmp_path, delivery):
     registry, _ident, token, gateway = setup(tmp_path)
     aid, message = gateway.generate(token, payload())
-    registry.delivery(aid, message["id"], "sent")
+    registry.delivery(aid, message["id"], delivery)
+    unconsumed = registry.unconsumed_responses(aid)
     registry.close(aid)
     _turns, seal = registry.seal(aid)
     assert seal["errors"] == ["unconfirmed_consumption"]
+    assert registry.unconsumed_responses(aid) == unconsumed
+    if delivery == "delivery_unknown":
+        with pytest.raises(ValueError, match="delivery was not confirmed"):
+            registry.wait_delivered(aid, .1)
+    else:
+        registry.wait_delivered(aid, .1)
     with pytest.raises(ValueError, match="sealed"):
         registry.consume(aid, message["id"], message["content"], "session")
     with pytest.raises(PermissionError):
@@ -118,6 +145,67 @@ def test_session_audit_covers_final_response(tmp_path):
     turns, seal = registry.seal(aid)
     assert seal["errors"] == []
     assert turns[0]["delivery"] == "consumed_confirmed"
+
+
+def test_sealed_trace_releases_payload_and_remains_idempotent(tmp_path):
+    registry = TraceRegistry(tmp_path / "traces")
+    gateway = Gateway(registry, Backend(), model="policy")
+    for version in range(1, 5):
+        for slot in range(2):
+            ident = identity(f"{version}-{slot}", policy_version=str(version))
+            token = registry.register(ident, "trial")
+            aid, message = gateway.generate(token, payload())
+            registry.delivery(aid, message["id"], "sent")
+            registry.consume(aid, message["id"], message["content"], "session")
+            registry.close(aid)
+            turns, seal = registry.seal(aid)
+            persisted = (registry.attempts[aid]["root"] / "trace.json").read_bytes()
+            assert registry.attempts[aid]["turns"] == []
+            assert registry.seal(aid) == (turns, seal)
+            turns[0]["input_ids"].append(999)
+            assert registry.seal(aid)[0][0]["input_ids"] == [1, 2]
+            assert (registry.attempts[aid]["root"] / "trace.json").read_bytes() == persisted
+            with pytest.raises(ValueError, match="registered"):
+                registry.register(ident, "other")
+            with pytest.raises(ValueError, match="unique"):
+                registry.register(identity(f"reuse-{version}-{slot}", policy_version=str(version)),
+                                  "other", credential=token)
+        registry.drain(.1)
+        next_version = str(version + 1)
+        registry.publish_version([{"healthy": True, "weight_version": next_version,
+                                   "endpoint": "engine"}], next_version)
+    assert len(registry.attempts) == 8
+    assert all(not state["turns"] for state in registry.attempts.values())
+    assert not registry.credentials
+    assert len(list((tmp_path / "traces").rglob("trace.json"))) == 8
+
+
+def test_seal_retains_payload_until_delivery_and_durable_write(tmp_path, monkeypatch):
+    from harborrl.gateway import trace
+
+    registry, _, token, gateway = setup(tmp_path)
+    aid, message = gateway.generate(token, payload())
+    registry.close(aid)
+    with pytest.raises(ValueError, match="drain"):
+        registry.seal(aid)
+    assert len(registry.attempts[aid]["turns"]) == 1
+    registry.delivery(aid, message["id"], "sent")
+    original_publish = trace.publish
+
+    def fail_trace(path, value):
+        if path.name == "trace.json":
+            raise OSError("disk unavailable")
+        return original_publish(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(trace, "publish", fail_trace)
+        with pytest.raises(OSError, match="disk unavailable"):
+            registry.seal(aid)
+    assert not registry.attempts[aid]["sealed"]
+    assert len(registry.attempts[aid]["turns"]) == 1
+    turns, seal = registry.seal(aid)
+    assert len(turns) == 1 and seal["errors"] == ["unconfirmed_consumption"]
+    assert registry.attempts[aid]["turns"] == []
 
 
 def test_session_audit_merges_split_assistant_blocks(tmp_path):

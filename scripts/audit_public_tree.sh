@@ -19,7 +19,7 @@ public_documents = {
     "configs/harbor_hub/public_compatibility_summary.md",
     "configs/harbor_hub/public_compatibility_summary_zh.md",
     "docs/agents/environment-check.md", "docs/configuration-wizard.md",
-    "docs/deployment.md", "docs/sandbox-rollout.md",
+    "docs/deployment.md", "docs/rollout-runtime-lifecycle.md", "docs/sandbox-rollout.md",
     "docs/train-inference-consistency.md", "docs/web-console.md",
     "practices/h_cluster/README.md", "harborrl/webui/static/lucide-LICENSE.txt",
 }

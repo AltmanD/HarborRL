@@ -355,7 +355,13 @@ def test_launcher_hooks_resolve_and_dry_run():
         v032_launcher.hook_arguments("slime-legacy")
 
 
-def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, monkeypatch):
+def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, monkeypatch, request):
+    import asyncio
+
+    from harborrl.rollout.runtime import close_runtime
+
+    close_runtime()
+    request.addfinalizer(close_runtime)
     groups = native_groups(tmp_path)
     locked = [
         [reidentify(json.loads(json.dumps(ir)), policy_version="7") for ir in group]
@@ -368,10 +374,18 @@ def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, mon
     args = SimpleNamespace(
         rollout_batch_size=2, n_samples_per_prompt=2, rollout_max_response_len=128,
     )
-    events = []
+    events, loops = [], []
+    semaphore = asyncio.Semaphore(1)
 
     async def runner(args_, groups_, policy_version):
         events.append(("generate", policy_version))
+        loops.append(asyncio.get_running_loop())
+
+        async def queued_slot():
+            async with semaphore:
+                await asyncio.sleep(.001)
+
+        await asyncio.gather(queued_slot(), queued_slot())
         return json.loads(json.dumps(locked))
 
     class SlimeDataSource:
@@ -403,6 +417,13 @@ def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, mon
         for sample in group
     )
     assert all(sample.metadata["native_ir"]["identity"]["policy_version"] == "7" for group in output.samples for sample in group)
+
+    second = generate_rollout(
+        args, 4, SlimeDataSource(), runner=runner, output_factory=SimpleNamespace,
+        sample_factory=lambda **fields: SimpleNamespace(**fields))
+    assert loops[0] is loops[1]
+    assert second.metrics["native_turn_count"] == 7.0
+    assert {sample.rollout_id for group in second.samples for sample in group} == {8, 9}
 
     async def stale_runner(args_, groups_, policy_version):
         return [[reidentify(json.loads(json.dumps(ir)), policy_version="8") for ir in group] for group in locked]

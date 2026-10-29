@@ -12,7 +12,7 @@ from harborrl.rollout.harbor_job.bindings import claude_config, sanitized_runner
 from harborrl.rollout.harbor_job.coordinator import GroupSlots, run_attempt
 from harborrl.trajectories.native import RewardProfile
 
-PROFILE = {"cli_version": "2.1.0", "model": "policy", "max_turns": 4,
+PROFILE = {"cli_version": "2.1.141", "model": "policy", "max_turns": 4,
            "agent_timeout_sec": 60, "setup_timeout_sec": 60, "verifier_timeout_sec": 60}
 
 
@@ -39,11 +39,16 @@ def test_profile_controls_reach_agent_and_host():
     disabled = claude_config({**PROFILE, "disallowed_tools": "Agent,Task,WebSearch,WebFetch"},
                              "http://gateway:8000", "token")
     assert disabled["kwargs"]["disallowed_tools"] == "Agent,Task,WebSearch,WebFetch"
-    assert config["env"]["DISABLE_AUTO_COMPACT"] == "1"
+    extended = claude_config({**PROFILE, "disallowed_tools": "WebSearch"},
+                             "http://gateway:8000", "token")
+    assert extended["kwargs"]["disallowed_tools"] == "Agent,Task,WebSearch"
+    for key in ("DISABLE_PROMPT_CACHING", "DISABLE_COMPACT", "DISABLE_AUTO_COMPACT"):
+        assert config["env"][key] == "1"
+        assert sanitized_runner_env({key: "0"})[key] == "1"
     assert config["env"]["ANTHROPIC_MODEL"] == "policy"
     assert config["env"]["NO_PROXY"] == "gateway"
     assert config["env"]["no_proxy"] == "gateway"
-    assert config["kwargs"]["version"] == "2.1.0"
+    assert config["kwargs"]["version"] == "2.1.141"
     assert sanitized_runner_env({"PATH": "/bin", "ANTHROPIC_API_KEY": "external", "HTTPS_PROXY": "external"})["PATH"] == "/bin"
     assert "ANTHROPIC_API_KEY" not in sanitized_runner_env({"ANTHROPIC_API_KEY": "external"})
     with pytest.raises(ValueError):
@@ -124,8 +129,46 @@ sys.stdin.readline()
     assert registry.attempts[identity().attempt_id]["closed"]
     assert (root / "failure.json").is_file()
     if mode != "wrong-event":
-        assert (root / "cleanup-required.json").is_file()
+        marker = json.loads((root / "cleanup-required.json").read_text())
+        assert marker["identity"] == identity().to_dict()
+        assert marker["trial_id"] == "trial"
+        assert marker["runner_host"] is None
     assert json.loads((root / "runner-events.json").read_text())[0]["type"] == "prepared"
+
+
+@pytest.mark.parametrize("runner_host", [None, "runner-host"])
+def test_cleanup_timeout_preserves_runner_marker_and_original_error(tmp_path, monkeypatch, runner_host):
+    worker = tmp_path / "worker.py"
+    worker.write_text('''import json, sys, time
+from pathlib import Path
+req = json.loads(sys.stdin.readline())
+print(json.dumps({"type": "prepared", "trial_id": "trial"}), flush=True)
+sys.stdin.readline()
+output = Path(req["output"])
+output.mkdir(parents=True)
+(output / "cleanup-required.json").write_text('{"reason": "deletion failed"}')
+print(json.dumps({"type": "event", "trial_id": "other"}), flush=True)
+time.sleep(30)
+''')
+    spawn = asyncio.create_subprocess_exec
+
+    async def fake_spawn(*args, **kwargs):
+        return await spawn(sys.executable, "-S", str(worker), **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    root = tmp_path / "attempt"
+    with pytest.raises(ValueError, match="event trial identity mismatch"):
+        asyncio.run(run_attempt(identity(), task_path=tmp_path, profile=PROFILE,
+            gateway_url="http://gateway", runner_python=sys.executable, root=root,
+            registry=TraceRegistry(tmp_path / "traces"), reward_profile=RewardProfile(),
+            timeout=2, cleanup_timeout=.1, runner_host=runner_host))
+    marker = json.loads((root / "cleanup-required.json").read_text())
+    assert marker["reason"] == "Inspect runner/cleanup-required.json"
+    assert marker["identity"] == identity().to_dict()
+    assert marker["trial_id"] == "trial"
+    assert marker["runner_host"] == runner_host
+    assert json.loads((root / "failure.json").read_text())["error_type"] == "ValueError"
+    assert (root / "runner-events.json").is_file()
 
 
 def test_offline_http_to_export_is_explicitly_synthetic(tmp_path):
