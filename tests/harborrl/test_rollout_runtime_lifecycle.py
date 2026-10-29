@@ -129,7 +129,9 @@ def test_embedded_failure_waits_for_other_groups_and_releases_loop(monkeypatch, 
 
     monkeypatch.delenv("HARBORRL_ROLLOUT_SERVICE_URL", raising=False)
     monkeypatch.setattr(rollout, "generate_group", generate)
-    with pytest.raises(error_type, match="original group error"):
+    # Python 3.10's asyncio.gather can discard CancelledError messages.
+    match = "original group error" if error_type is ValueError else None
+    with pytest.raises(error_type, match=match):
         runtime.run_embedded(rollout.run_native_groups(
             SimpleNamespace(rollout_max_response_len=128), ["failed", "pending"], None, 0))
     assert events == ["sibling cleaned"]
