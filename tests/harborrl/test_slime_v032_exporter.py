@@ -357,6 +357,7 @@ def test_launcher_hooks_resolve_and_dry_run():
 
 def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, monkeypatch, request):
     import asyncio
+
     from harborrl.rollout.runtime import close_runtime
 
     close_runtime()

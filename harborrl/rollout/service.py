@@ -29,7 +29,13 @@ from urllib.parse import urlsplit
 
 from harborrl.rollout.exporters.native import export_group
 from harborrl.rollout.runtime import run_group
-from harborrl.trajectories.native import canonical_sampling, digest, finite, publish, read_json
+from harborrl.trajectories.native import (
+    canonical_sampling,
+    digest,
+    finite,
+    publish,
+    read_json,
+)
 
 SERVICE_SCHEMA = "harborrl-rollout-service-v1"
 GROUP_REQUEST_KEYS = {"group_id", "rollout_id", "group_index", "policy_version",

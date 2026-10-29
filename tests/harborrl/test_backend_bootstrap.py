@@ -40,8 +40,8 @@ fi
     child = subprocess.run(
         ["bash", "-c", '. "$1"\nexec "$2" -c "$3"', "bootstrap-test",
          str(env_file), sys.executable,
-         'import json, os; print(json.dumps({k: os.environ.get(k) for k in '
-         '("SLIME_DIR", "MEGATRON_DIR", "SGLANG_IMAGE")}))'],
+         ('import json, os; print(json.dumps({k: os.environ.get(k) for k in '
+          '("SLIME_DIR", "MEGATRON_DIR", "SGLANG_IMAGE")}))')],
         cwd=bin_dir, env={key: value for key, value in env.items() if key != "SGLANG_IMAGE"},
         check=True, capture_output=True, text=True, timeout=10)
     assert json.loads(child.stdout) == {
