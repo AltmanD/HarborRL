@@ -61,11 +61,12 @@ def publish(path, value):
         except FileExistsError:
             if path.read_bytes() != payload:
                 raise ValueError(f"conflicting immutable record: {path.name}")
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         os.unlink(temp)
     return path

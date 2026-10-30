@@ -194,6 +194,85 @@ def test_import_rejects_invalid_answers(server, console, text):
     assert request(server, console, "POST", "/api/import", {"text": text})[0] == 400
 
 
+def test_incomplete_draft_http_resume_update_conflict(server, console):
+    body = {"name": "first-draft", "answers": {"answers_version": 1, "preset": "embedded-local"}}
+    status, _, payload = request(server, console, "POST", "/api/drafts", body)
+    assert status == 201, payload
+    saved = json.loads(payload)
+    assert saved["revision"] == 1 and saved["kind"] == "draft"
+    status, _, payload = request(server, console, "GET", "/api/drafts/first-draft")
+    assert status == 200 and json.loads(payload)["answers"] == body["answers"]
+    assert request(server, console, "POST", "/api/drafts", body)[0] == 400
+    body["revision"] = saved["revision"]
+    body["answers"]["training"] = {"model": {"checkpoint": ""}}
+    status, _, payload = request(server, console, "POST", "/api/drafts", body)
+    assert status == 201 and json.loads(payload)["revision"] == 2
+    assert request(server, console, "POST", "/api/drafts", body)[0] == 400
+    assert request(server, console, "POST", "/api/configurations", body)[0] == 400
+    assert request(server, console, "POST", "/api/jobs", {"configuration": "first-draft", "mode": "dry-run"})[0] == 400
+    assert not console.list_configurations() and not console.jobs.list()
+    recovered = Console(console.workspace)
+    try:
+        assert recovered.draft("first-draft")["revision"] == 2
+        assert recovered.bootstrap()["drafts"][0]["id"] == "first-draft"
+    finally:
+        recovered.jobs.close()
+
+
+def test_missing_answers_are_structured_and_help_is_present(server, console):
+    status, _, payload = request(server, console, "POST", "/api/preview", {
+        "name": "missing", "answers": {"answers_version": 1, "preset": "embedded-local"}})
+    result = json.loads(payload)
+    assert status == 400 and result["code"] == "missing_answers"
+    assert all(row["label"] and row["help"] and row["step"] == 1 for row in result["fields"])
+    assert any(row["path"] == "training.model.checkpoint" for row in result["fields"])
+    bootstrap = console.bootstrap()
+    assert len(bootstrap["examples"]) == 2
+    assert bootstrap["field_help"]["local_environment.python"]["help"]
+
+
+def test_prepare_endpoint_is_explicit_not_part_of_preview(server, console, answers, monkeypatch):
+    from harborrl.options import fingerprints
+    calls = []
+    def prepare(answers, output):
+        calls.append((answers, output))
+        return {"fingerprints": {"tokenizer_digest": "a" * 64, "template_digest": "b" * 64}, "target": "local"}
+    monkeypatch.setattr(fingerprints, "prepare_model", prepare)
+    body = {"name": "prepare", "answers": answers}
+    assert request(server, console, "POST", "/api/preview", body)[0] == 200
+    assert not calls
+    status, _, payload = request(server, console, "POST", "/api/prepare-model", body)
+    assert status == 200 and json.loads(payload)["fingerprints"]["tokenizer_digest"] == "a" * 64
+    assert len(calls) == 1
+
+
+def test_bundled_task_inputs_are_idempotent_and_valid(server, console):
+    from harborrl.tasks.provider import NativeTaskProvider
+    status, _, payload = request(server, console, "POST", "/api/hello-inputs", {})
+    assert status == 200, payload
+    inputs = json.loads(payload)
+    assert NativeTaskProvider().catalog({"tasks": {"catalog": inputs["catalog"]}})[0]["id"] == "hello_world"
+    assert Path(inputs["profile"]).is_file()
+    assert json.loads(request(server, console, "POST", "/api/hello-inputs", {})[2]) == inputs
+
+
+def test_hello_web_job_runs_without_configuration(server, console):
+    status, _, payload = request(server, console, "POST", "/api/hello", {})
+    assert status == 201, payload
+    job = json.loads(payload)
+    for _ in range(300):
+        record = console.jobs.list()[0]
+        if record["state"] != "running":
+            break
+        time.sleep(.05)
+    assert record["state"] == "succeeded", console.jobs.log(job["id"])
+    log = console.jobs.log(job["id"])
+    assert "[3/3] PASS" in log["text"]
+    assert record["mode"] == "hello" and record["exit_code"] == 0
+    assert (Path(record["output_root"]) / "hello-result.json").is_file()
+    assert not console.list_configurations()
+
+
 def test_preview_never_starts_process(server, console, answers, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Preview must not start a process")

@@ -1,30 +1,32 @@
-# Replace every example path and REPLACE_* value. No model fit is implied.
+# Reference recipe. Replace example paths; init calculates model fingerprints.
 answers_version: 1
 preset: embedded-local
+local_environment:
+  source_dir: /srv/harborrl/source
+  python: /opt/harborrl/bin/python
 training:
   tasks:
     catalog: /srv/harborrl/inputs/tasks.jsonl
   harness:
     profile: /srv/harborrl/inputs/claude-code.json
-  harbor:
-    python: /opt/harbor/bin/python
   model:
     checkpoint: /srv/models/qwen
     reference: /srv/models/qwen-reference
     args_file: qwen3-8B
   gateway:
-    tokenizer_digest: REPLACE_WITH_ACTUAL_TOKENIZER_SHA256
-    template_digest: REPLACE_WITH_ACTUAL_TEMPLATE_SHA256
+    host: 0.0.0.0
+    advertised_url: http://host.docker.internal:49184
+    tokenizer_digest: null
+    template_digest: null
   deployment:
     layout: colocate
-    num_gpus: 1
+    num_gpus: 4
   sampling:
     group_size: 2
     groups_per_batch: 1
 deployment:
-  manager:
-    source_dir: /srv/harborrl/source
-    controller_python: /opt/controller/bin/python
-  gpu_target:
-    source_dir: /srv/harborrl/source
-    train_python: /opt/training/bin/python
+  storage:
+    run_root: /srv/harborrl/runs
+# Linux Docker must map host.docker.internal to host-gateway, or use a reachable host address.
+# The interactive wizard detects the source and Python on its own host.
+# Four GPUs is a layout example; confirm model memory requirements with Doctor.

@@ -13,7 +13,14 @@ from urllib.parse import urlsplit
 import yaml
 
 from harborrl.options.catalog import build_catalog
-from harborrl.options.presets import PRESETS, defaults
+from harborrl.options.onboarding import (
+    FIELD_HELP,
+    describe_field,
+    load_draft,
+    reference_examples,
+    save_draft,
+)
+from harborrl.options.presets import PRESETS, MissingAnswers, check_answers, defaults
 from harborrl.options.validation import read_mapping, validate_mappings
 from harborrl.options.wizard import build_config_bundle, publish_bundle
 
@@ -32,6 +39,8 @@ class Console:
         self.workspace = Path(workspace).expanduser().resolve()
         self.configurations = self.workspace / "configurations"
         self.configurations.mkdir(parents=True, exist_ok=True)
+        self.drafts = self.workspace / "drafts"
+        self.drafts.mkdir(exist_ok=True)
         self.jobs = Jobs(self.workspace / "jobs")
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
@@ -49,7 +58,30 @@ class Console:
                 "live_supported": os.name == "posix",
                 "defaults": {item["id"]: dict(zip(("training", "deployment"),
                               defaults(item["id"], self.configurations / "experiment"))) for item in PRESETS},
+                "field_help": {path: describe_field(path) for path in FIELD_HELP},
+                "examples": reference_examples(self.configurations / "experiment"),
+                "drafts": self.list_drafts(),
                 "configurations": self.list_configurations(), "jobs": self.jobs.list()}
+
+    def draft_path(self, name):
+        self.directory(name)
+        path = self.drafts / (name + ".json")
+        if path.is_symlink() or path.resolve().parent != self.drafts:
+            raise ValueError("Draft must stay inside the workspace")
+        return path
+
+    def list_drafts(self):
+        return [{"id": path.stem, "revision": load_draft(path)["revision"], "kind": "draft"}
+                for path in sorted(self.drafts.glob("*.json"))
+                if not path.is_symlink() and NAME.fullmatch(path.stem)]
+
+    def draft(self, name):
+        return {"id": name, **load_draft(self.draft_path(name))}
+
+    def save_draft(self, body):
+        with self.lock:
+            document = save_draft(self.draft_path(body["name"]), body["answers"], revision=body.get("revision"))
+            return {"id": body["name"], "kind": "draft", "path": str(self.draft_path(body["name"])), **document}
 
     def list_configurations(self):
         result = []
@@ -78,6 +110,9 @@ class Console:
         manifest = json.loads((root / "setup-manifest.json").read_text(encoding="utf-8"))
         answers = {"answers_version": 1, "preset": manifest["preset"],
                    "training": read_mapping(root / "config.yaml"), "deployment": read_mapping(root / "deployment.yaml")}
+        if answers["preset"] == "embedded-local":
+            manager = answers["deployment"]["manager"]
+            answers["local_environment"] = {"source_dir": manager["source_dir"], "python": manager["controller_python"]}
         return {"id": identifier, "answers": answers,
                 "files": {name: (root / name).read_text(encoding="utf-8") for name in
                           ("config.yaml", "deployment.yaml", "setup-manifest.json")}}
@@ -135,6 +170,8 @@ def make_server(console, port=0):
                         return self.respond(200, console.bootstrap())
                     if path == "/api/jobs":
                         return self.respond(200, console.jobs.list())
+                    if path.startswith("/api/drafts/"):
+                        return self.respond(200, console.draft(path.removeprefix("/api/drafts/")))
                     if path.startswith("/api/jobs/"):
                         return self.respond(200, console.jobs.log(path.removeprefix("/api/jobs/")))
                     if path.startswith("/api/configurations/"):
@@ -154,6 +191,25 @@ def make_server(console, port=0):
                         return self.respond(200, console.preview(body))
                     if path == "/api/configurations":
                         return self.respond(201, console.save(body))
+                    if path == "/api/drafts":
+                        return self.respond(201, console.save_draft(body))
+                    if path == "/api/prepare-model":
+                        from harborrl.options.fingerprints import prepare_model
+                        return self.respond(200, prepare_model(body["answers"], console.directory(body["name"])))
+                    if path == "/api/hello":
+                        return self.respond(201, console.jobs.start_hello())
+                    if path == "/api/hello-inputs":
+                        from harborrl.hello import create_inputs
+                        with console.lock:
+                            root = console.workspace / "hello-world"
+                            if not root.exists():
+                                create_inputs(root)
+                            if root.is_symlink() or not root.resolve().is_relative_to(console.workspace):
+                                raise ValueError("Hello World inputs must stay inside the workspace")
+                            if not all((root / name).is_file() for name in ("catalog.json", "claude-code-profile.json")):
+                                raise ValueError("Hello World inputs are incomplete. Run harborrl hello with a new output directory and use its catalog and profile.")
+                            return self.respond(200, {"catalog": str(root / "catalog.json"),
+                                                      "profile": str(root / "claude-code-profile.json")})
                     if path == "/api/jobs":
                         return self.respond(201, console.start(body))
                     if path == "/api/stop":
@@ -167,14 +223,12 @@ def make_server(console, port=0):
                         if (not isinstance(answers, dict) or type(answers.get("answers_version")) is not int
                                 or answers.get("answers_version") != 1):
                             raise ValueError("Import an answers_version: 1 YAML/JSON mapping")
-                        if set(answers) - {"answers_version", "preset", "training", "deployment", "sandbox_config"}:
-                            raise ValueError("Unknown answer fields")
-                        if any(not isinstance(answers.get(key, {}), dict) for key in ("training", "deployment")):
-                            raise ValueError("training and deployment answers must be objects")
-                        if answers.get("preset") not in {p["id"] for p in PRESETS}:
-                            raise ValueError("Unknown deployment preset")
+                        check_answers(answers, console.configurations / "import")
                         return self.respond(200, {"answers": answers})
                 self.respond(404, {"error": "Not found"})
+            except MissingAnswers as exc:
+                self.respond(400, {"error": "Complete these fields to create a runnable configuration. You can save this draft now.",
+                                   "code": "missing_answers", "fields": exc.fields})
             except (ValueError, TypeError, KeyError, OSError, AttributeError, yaml.YAMLError) as exc:
                 self.respond(400, {"error": str(exc)})
 

@@ -14,11 +14,11 @@ training:
     reference: /srv/models/qwen-reference
     args_file: qwen3-8B
   gateway:
-    tokenizer_digest: REPLACE_WITH_ACTUAL_TOKENIZER_SHA256
-    template_digest: REPLACE_WITH_ACTUAL_TEMPLATE_SHA256
+    tokenizer_digest: null  # Calculated automatically with the GPU Python over SSH.
+    template_digest: null
   deployment:
     layout: colocate
-    num_gpus: 1
+    num_gpus: 4
 deployment:
   manager:
     source_dir: /srv/shared/harborrl

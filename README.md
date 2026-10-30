@@ -44,10 +44,14 @@ HarborRL supports flexible combinations of **Models × Algorithms × Tasks × Ha
 
 For the offline options catalog, interactive configuration, and answer-file setup,
 see the [configuration CLI guide](docs/configuration-wizard.md).
-Start with `harborrl options` or `harborrl init --help`.
+Start with `harborrl hello` for a CPU walkthrough requiring no model, GPU or task
+JSON. It executes scripted attempts and a real verifier, then exports a GRPO batch
+with fixture tokens. Continue with `harborrl options` or `harborrl init --help`.
+The wizard detects one shared Local environment, calculates model fingerprints,
+and supports incomplete drafts (`:save` / `--resume`).
 
 Run `harborrl web` to open the local browser console for configuration, validation,
-dry-runs, training launch, and logs. See the [web console guide](docs/web-console.md)
+drafts, filled Local/Sandbox examples, Hello World, dry-runs, training launch, and logs. See the [web console guide](docs/web-console.md)
 for remote-controller access and lifecycle details.
 
 If you want an AI agent to help deploy this repository and verify training,

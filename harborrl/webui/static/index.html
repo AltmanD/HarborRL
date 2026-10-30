@@ -60,6 +60,7 @@
               <h1>Training configuration</h1>
             </div>
             <div class="toolbar">
+              <button id="save-draft" class="secondary">Save draft</button>
               <button
                 id="mobile-new"
                 class="icon-button mobile-only"
@@ -85,6 +86,15 @@
               />
             </div>
           </div>
+          <section class="onboarding" aria-label="Getting started">
+            <div><h2>Start here</h2><p>Try the workflow on CPU, or open a filled deployment recipe to see what each field means.</p></div>
+            <div class="onboarding-actions">
+              <button id="hello-world" class="primary"><i data-lucide="play"></i>Run Hello World</button>
+              <button data-example="embedded-local" class="secondary">Local example</button>
+              <button data-example="service-sandbox-local-runner" class="secondary">Sandbox example</button>
+            </div>
+            <p class="muted">Hello World executes a scripted task and verifier, then exports a GRPO batch with fixture tokens. No model, GPU or task JSON is needed.</p>
+          </section>
           <div class="configuration-name">
             <label for="config-name">Configuration name</label
             ><input
@@ -95,6 +105,7 @@
               autocomplete="off"
             /><span id="draft-state" class="badge">Draft</span>
           </div>
+          <div id="missing-fields" class="missing-fields" role="alert" hidden></div>
           <nav id="steps" class="steps" aria-label="Configuration sections">
             <button data-step="0" class="active">
               <span>1</span>Deployment</button
@@ -161,7 +172,7 @@ Complete required fields to preview.</pre
                 ><button id="next" class="primary">
                   Continue<i data-lucide="arrow-right"></i></button
                 ><button id="save" class="primary" hidden>
-                  <i data-lucide="save"></i>Save configuration
+                  <i data-lucide="file-check"></i>Create runnable configuration
                 </button>
               </div>
             </div>
@@ -268,6 +279,13 @@ Complete required fields to preview.</pre
           <i data-lucide="download"></i>Export answers</button
         ><button id="apply-answers" class="primary">Apply answers</button>
       </div>
+    </dialog>
+    <dialog id="example-dialog">
+      <div class="dialog-heading"><h2 id="example-title">Best-practice reference</h2><button id="close-example" class="icon-button" aria-label="Close example"><i data-lucide="x"></i></button></div>
+      <p>Filled reference with illustrative model paths and hostnames. Replace them for your site, prepare the model, then validate before training.</p>
+      <ul id="example-notes"></ul>
+      <pre id="example-content" class="code-panel" tabindex="0"></pre>
+      <div class="dialog-actions"><button id="download-example" class="secondary">Download answers</button><button id="apply-example" class="primary">Use as a new draft</button></div>
     </dialog>
   </body>
 </html>
