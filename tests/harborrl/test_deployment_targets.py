@@ -142,7 +142,8 @@ def test_ssh_command_assembles_noninteractive_ssh():
     assert argv[-2:] == ["root@gpu", "true"]
 
 
-def test_service_dispatch_launches_gpu_job_through_controller(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("shutdown_error", [False, True])
+def test_service_dispatch_launches_gpu_job_through_controller(tmp_path, monkeypatch, capsys, shutdown_error):
     """P1+P3 manager flow: materialize, register the run, launch, wait, report."""
     import json as json_module
     from pathlib import Path
@@ -185,10 +186,10 @@ def test_service_dispatch_launches_gpu_job_through_controller(tmp_path, monkeypa
             pass
 
         def shutdown(self):
-            pass
+            launched["control_shutdown"] = True
 
         def server_close(self):
-            pass
+            launched["control_closed"] = True
 
     class FakeTarget:
         def __init__(self, spec, *, source_dir, run_dir, **kwargs):
@@ -214,8 +215,19 @@ def test_service_dispatch_launches_gpu_job_through_controller(tmp_path, monkeypa
     monkeypatch.setattr(controller_module, "SshTrainingTarget", FakeTarget)
     monkeypatch.setattr(controller_module, 'check_gpu_control', lambda _: {'gpu_to_controller': True})
 
+    if shutdown_error:
+        original_close = controller_module.RolloutService.close
+        def failed_close(service):
+            original_close(service)
+            raise RuntimeError("cleanup failure")
+        monkeypatch.setattr(controller_module.RolloutService, "close", failed_close)
+        with pytest.raises(RuntimeError, match="cleanup failure"):
+            controller_module.dispatch_service(plan, deployment, checks=[])
+        assert launched["control_shutdown"] and launched["control_closed"]
+        return
     exit_code = controller_module.dispatch_service(plan, deployment, checks=[])
     assert exit_code == 0
+    assert launched["control_shutdown"] and launched["control_closed"]
     run_dir = Path(launched["run_dir"])
     assert run_dir.is_dir()
     environment = launched["environment"]

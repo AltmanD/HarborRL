@@ -50,6 +50,27 @@ loop. Call it between rollout calls, outside an active event loop; process exit 
 registers cleanup. The implementation supports Python 3.10. The manager-side
 RolloutService continues to use its own persistent loop.
 
+## Manager Service Shutdown
+
+The manager service has its own executor loop; embedded-loop shutdown does not
+close it. A generation drain alone only waits for policy requests, not tools,
+Runner processes, verifier execution or environment deletion.
+
+`RolloutService.close()` first blocks new admission, cancels and joins group
+Tasks including their asynchronous cleanup, drains remaining generation, and
+only then closes runtime/Gateway and the executor loop. Its default cleanup
+budget covers the Runner's 120-second cancellation deadline and configured
+Sandbox cleanup deadlines. Cancelling a cross-thread Future is not treated as
+cleanup acknowledgement.
+
+A cleanup timeout is an explicit error, not successful cancellation. Pending
+cleanup keeps running on the executor, and an incomplete shutdown writes
+`native-rollouts/cleanup-required.json`. Inspect the resources and resolve that
+marker before reusing the run. A subsequent close can join cleanup without
+sending another cancellation into an already-running `finally` block. The
+controller always closes its HTTP listener, but does not suppress a service
+shutdown failure.
+
 ## CPU Regression Checks
 
 These checks use synthetic serving, mock resource allocation, real local Runner

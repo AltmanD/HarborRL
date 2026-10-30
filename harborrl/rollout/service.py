@@ -16,6 +16,7 @@ Rules that keep the lifecycle safe:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -166,6 +167,8 @@ class GroupState:
     error: str = None
     created_at: float = field(default_factory=time.time)
     future: object = None
+    task: object = None
+    cancel_requested: bool = False
 
     def summary(self, *, include_result=True):
         payload = {"group_id": self.request["group_id"], "status": self.status,
@@ -196,7 +199,9 @@ class RolloutService:
 
     def __init__(self, *, run_root, executor=None, runtime_factory=None,
                  token_file=None, group_wait_timeout=3600.0, poll_interval=0.05,
-                 allow_synthetic=False):
+                 allow_synthetic=False, cleanup_timeout=None):
+        if cleanup_timeout is not None and (not finite(cleanup_timeout) or cleanup_timeout <= 0):
+            raise ValueError("cleanup_timeout must be positive and finite")
         self.run_root = Path(run_root).resolve()
         self.executor = executor or default_executor
         self.runtime_factory = runtime_factory
@@ -211,6 +216,9 @@ class RolloutService:
         self.poll_interval = poll_interval
         self.runs = {}
         self.lock = threading.RLock()
+        self._close_lock = threading.Lock()
+        self._closing = self._closed = False
+        self.cleanup_timeout = cleanup_timeout
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._serve_loop,
                                        name="harborrl-rollout-service", daemon=True)
@@ -220,16 +228,72 @@ class RolloutService:
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    def close(self):
+    def _cleanup_budget(self):
+        if self.cleanup_timeout is not None:
+            return self.cleanup_timeout
+        # Runner cancellation allows 120s, or the configured Sandbox deletion
+        # deadline plus 15s. The service must not cut that lifecycle to 30s.
+        budgets = [120.0]
         with self.lock:
-            states = [state for state in self.runs.values() if state.runtime is not None]
+            states = list(self.runs.values())
         for state in states:
+            sandbox = getattr(state.config, "sandbox", None)
+            if sandbox:
+                budgets.append(float(sandbox["cleanup_timeout_s"]) + 15)
+        return max(budgets) + 30
+
+    def _ensure_open(self):
+        if self._closing:
+            raise ServiceError(503, "service_closing", "rollout service is closing")
+
+    def _shutdown_failed(self, error):
+        marker = self.run_root / "native-rollouts" / "cleanup-required.json"
+        if not marker.exists():
+            publish(marker, {"reason": "RolloutService shutdown incomplete",
+                             "error": str(error),
+                             "groups": {state.run_id: {key: group.status for key, group in state.groups.items()}
+                                        for state in self.runs.values()}})
+
+    async def _shutdown_loop_resources(self):
+        await self.loop.shutdown_asyncgens()
+        await self.loop.shutdown_default_executor()
+
+    def close(self):
+        if threading.current_thread() is self.thread:
+            raise RuntimeError("close the rollout service outside its executor loop")
+        with self._close_lock:
+            if self._closed:
+                return
+            with self.lock:
+                self._closing = True
+                states = list(self.runs.values())
+                for state in states:
+                    state.drained = True
+                groups = [group for state in states for group in state.groups.values()]
             try:
-                state.runtime.close()
-            except AttributeError:
-                pass
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join(5)
+                self._cancel_groups(groups)
+                for state in states:
+                    if state.runtime is None:
+                        continue
+                    registry = getattr(state.runtime, "registry", None)
+                    if registry is not None:
+                        registry.drain(float(getattr(state.config, "drain_timeout", 30)))
+                    close = getattr(state.runtime, "close", None)
+                    if close is not None:
+                        close()
+                future = asyncio.run_coroutine_threadsafe(self._shutdown_loop_resources(), self.loop)
+                future.result(timeout=self._cleanup_budget())
+                self.loop.call_soon_threadsafe(self.loop.stop)
+                self.thread.join(5)
+                if self.thread.is_alive():
+                    raise ServiceError(409, "shutdown_timeout", "rollout executor thread has not stopped")
+                self.loop.close()
+                self._closed = True
+            except Exception as exc:
+                # Keep the executor alive to finish pending cleanup; never claim
+                # that a deadline or a cancelled wrapper Future proves deletion.
+                self._shutdown_failed(exc)
+                raise
 
     # -- run lifecycle ----------------------------------------------------
 
@@ -245,6 +309,7 @@ class RolloutService:
             raise ServiceError(400, "invalid_request", "manifest run id must match the path")
         manifest_sha = digest(manifest)
         with self.lock:
+            self._ensure_open()
             existing = self.runs.get(run_id)
             if existing is not None:
                 if existing.manifest_sha != manifest_sha:
@@ -281,6 +346,7 @@ class RolloutService:
     def attach_runtime(self, run_id, config, runtime):
         """Bind the rollout runtime that executes this run's groups."""
         with self.lock:
+            self._ensure_open()
             state = self._run(run_id)
             state.config, state.runtime = config, runtime
         return {"run_id": run_id, "state": "attached"}
@@ -292,6 +358,7 @@ class RolloutService:
                 or parts.fragment or parts.path not in ("", "/")):
             raise ServiceError(400, "invalid_request", "router_url must be a plain origin")
         with self.lock:
+            self._ensure_open()
             state = self._run(run_id)
             state.serving = f"{parts.scheme}://{parts.netloc}".rstrip("/")
             if state.runtime is None and self.runtime_factory is not None:
@@ -310,6 +377,7 @@ class RolloutService:
         from harborrl.platform.policy_pool import validate_pool
 
         with self.lock:
+            self._ensure_open()
             state = self._run(run_id)
         if state.runtime is None:
             raise ServiceError(409, "admission_closed", "run has no serving runtime yet")
@@ -324,16 +392,18 @@ class RolloutService:
                 states = live_states
         except (RuntimeError, TypeError, ValueError) as exc:
             raise ServiceError(409, "pool_invalid", str(exc)) from exc
-        registry = state.runtime.registry
-        registry.drain(float(getattr(state.config, "drain_timeout", 30)))
-        registry.publish_version(states, version)
-        # Mirror policy_pool.publish_pool into the shared run directory so the
-        # GPU side can lock the same version without manager-local state; the
-        # record is replaceable because activation legitimately advances.
-        payload = {"weight_version": version, "engines": states, "timestamp": time.time()}
-        temp = self.run_root / "policy-pool.tmp"
-        temp.write_text(json.dumps(payload) + "\n")
-        temp.replace(self.run_root / "policy-pool.json")
+        with self.lock:
+            # Pool probes above can race a shutdown. Do not reopen generation
+            # admission after close has frozen the service.
+            self._ensure_open()
+            registry = state.runtime.registry
+            registry.drain(float(getattr(state.config, "drain_timeout", 30)))
+            registry.publish_version(states, version)
+            # Mirror the admitted version into shared storage.
+            payload = {"weight_version": version, "engines": states, "timestamp": time.time()}
+            temp = self.run_root / "policy-pool.tmp"
+            temp.write_text(json.dumps(payload) + "\n")
+            temp.replace(self.run_root / "policy-pool.json")
         return {"run_id": run_id, "policy_version": version, "admission": "open"}
 
     # -- group lifecycle ----------------------------------------------------
@@ -353,6 +423,7 @@ class RolloutService:
                                        "group id already submitted with different content")
                 group = existing
             else:
+                self._ensure_open()
                 if state.drained:
                     raise ServiceError(409, "admission_closed", "run is draining")
                 if state.runtime is None or state.config is None:
@@ -387,12 +458,15 @@ class RolloutService:
     async def _execute(self, state, group):
         # Immutable state records: each transition gets its own file, and
         # publish() refuses to rewrite history.
+        group.task = asyncio.current_task()
         request = group.request
         directory = self._group_dir(state.run_id, request["group_id"])
-        publish(directory / "request.json", request)
-        group.status = "running"
-        publish(directory / "running.json", group.summary(include_result=False))
         try:
+            publish(directory / "request.json", request)
+            if group.cancel_requested:
+                raise asyncio.CancelledError
+            group.status = "running"
+            publish(directory / "running.json", group.summary(include_result=False))
             trajectories = await self.executor(state.config, state.runtime, request)
             export = export_group(
                 trajectories, len(trajectories),
@@ -450,19 +524,38 @@ class RolloutService:
     def cancel_run(self, run_id):
         with self.lock:
             state = self._run(run_id)
+            state.drained = True
             groups = list(state.groups.values())
         self._cancel_groups(groups)
         return {"run_id": run_id, "state": "cancelled",
                 "groups": {group.request["group_id"]: group.status for group in groups}}
 
-    def _cancel_groups(self, groups):
+    async def _cancel_and_wait(self, groups):
         for group in groups:
-            if group.status in ("queued", "running") and group.future is not None:
-                group.future.cancel()
-        deadline = time.monotonic() + 30
-        while any(group.status in ("queued", "running") for group in groups) \
-                and time.monotonic() < deadline:
-            time.sleep(self.poll_interval)
+            if not group.cancel_requested and group.future is not None and not group.future.done():
+                group.cancel_requested = True
+                if group.task is not None:
+                    group.task.cancel()
+        # Do not cancel the run_coroutine_threadsafe Future: that wrapper can
+        # become done before the actual Task's asynchronous finally completes.
+        pending = [asyncio.wrap_future(group.future) for group in groups if group.future is not None]
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise ServiceError(500, "cleanup_failed", f"group completion failed: {result}")
+
+    def _cancel_groups(self, groups):
+        if not any(group.future is not None for group in groups):
+            return
+        if threading.current_thread() is self.thread:
+            raise RuntimeError("cancel rollout groups outside their executor loop")
+        joined = asyncio.run_coroutine_threadsafe(self._cancel_and_wait(groups), self.loop)
+        try:
+            joined.result(timeout=self._cleanup_budget())
+        except concurrent.futures.TimeoutError as exc:
+            # Leave the waiter and group cleanup running; a second cancel would
+            # interrupt their finally blocks. Retrying close may join them later.
+            raise ServiceError(409, "cleanup_timeout", "rollout groups are still cleaning up") from exc
 
 
 def make_control_server(service, host="127.0.0.1", port=0, *, max_body_bytes=8 * 1024 * 1024):
