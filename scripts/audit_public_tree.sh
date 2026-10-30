@@ -98,7 +98,7 @@ for path in files:
     for label, pattern in internal_patterns.items():
         for match in pattern.finditer(data):
             value = match.group(0)
-            if b"127.0.0.1" in value or b"localhost" in value:
+            if b"127.0.0.1" in value or b"localhost" in value or value == b"host.docker.internal":
                 continue
             raise SystemExit(f"{path} contains {label}: {value.decode(errors='replace')}")
 

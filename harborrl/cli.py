@@ -9,6 +9,10 @@ from pathlib import Path
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "hello":
+        from harborrl.hello import main as hello_main
+
+        return hello_main(argv[1:])
     if argv and argv[0] == "web":
         from harborrl.webui.cli import main as web_main
 
@@ -32,7 +36,7 @@ def main(argv=None):
         return hub_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="harborrl", description=__doc__, allow_abbrev=False,
-        epilog="Configuration tools: harborrl options --help; harborrl validate --help; harborrl init --help; harborrl web --help."
+        epilog="New here? harborrl hello. Configuration tools: harborrl options --help; harborrl validate --help; harborrl init --help; harborrl web --help."
     )
     parser.add_argument("-model", help="Slime model preset to select")
     parser.add_argument("-harness", help="agent harness to select")

@@ -46,8 +46,12 @@ HarborRL 支持 **Models × Algorithms × Tasks × Harnesses (MATH)** 的灵活�
 [docs/agents/environment-check.md](docs/agents/environment-check.md)。
 
 离线选项目录、交互式配置和 answer-file 配置方式见[配置 CLI 指南](docs/configuration-wizard.md)。
-可以从 `harborrl options` 或 `harborrl init --help` 开始。
-运行 `harborrl web` 可打开本地浏览器控制台，完成配置、校验、dry-run、训练启动和日志查看；
+首次使用可以先运行 `harborrl hello`：无需模型、GPU 或已有 task JSON，
+即可执行脚本任务、真实 verifier、0/1 奖励收集和使用示例 token 的 GRPO batch 导出。
+接着使用 `harborrl options` 或 `harborrl init --help`。Local 模式会检测并共用
+一套源码目录与 Python；模型指纹自动计算，未填完的草稿支持 `:save` 保存和 `--resume` 恢复。
+运行 `harborrl web` 可打开浏览器控制台，查看或套用 Local／Sandbox 示例、
+随时保存草稿、一键运行 Hello World，并完成校验、dry-run、训练启动和日志查看；
 远程访问与生命周期说明见 [Web 控制台指南](docs/web-console.md)。
 
 推荐的实际操作流程是把下面这段提示词交给 agent，并把尖括号内容替换成你的机器信息：

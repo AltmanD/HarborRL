@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,42 @@ class Jobs:
             self._save(record)
             if self.child is not None:
                 threading.Thread(target=self._watch, args=(self.child,), name="harborrl-web-job", daemon=True).start()
+            return dict(record)
+
+    def start_hello(self):
+        """Use the same durable logs/lifecycle without requiring a training configuration."""
+        from harborrl.config import ROOT
+
+        with self.lock:
+            self._refresh()
+            if self.closed or self.child is not None:
+                raise ValueError("A job is already active or the console is closing")
+            if any(record["state"] == "unknown" for record in self.records.values()):
+                raise ValueError("An interrupted job must be reconciled before launching again")
+            identifier = uuid4().hex
+            root = self.root / identifier
+            root.mkdir(mode=0o700)
+            output = root / "output"
+            command = [sys.executable, "-u", "-m", "harborrl.cli", "hello", "--out-dir", str(output)]
+            record = {"id": identifier, "configuration": "Hello World", "mode": "hello", "state": "running",
+                      "created_at": now(), "finished_at": None, "exit_code": None, "command": command,
+                      "log_path": str(root / "console.log"), "snapshot": str(root), "output_root": str(output)}
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(ROOT), env.get("PYTHONPATH")]))
+            self._save(record)
+            try:
+                with (root / "console.log").open("wb") as log:
+                    self.child = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError as exc:
+                record.update(state="failed", message=str(exc), finished_at=now())
+            else:
+                self.active = identifier
+                record["pid"] = self.child.pid
+            self.records[identifier] = record
+            self._save(record)
+            if self.child is not None:
+                threading.Thread(target=self._watch, args=(self.child,), name="harborrl-web-hello", daemon=True).start()
             return dict(record)
 
     def stop(self, identifier):

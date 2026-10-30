@@ -14,6 +14,14 @@ PRESETS = (
 )
 
 
+class MissingAnswers(ValueError):
+    def __init__(self, paths):
+        from .onboarding import describe_field
+        self.fields = [describe_field(path) for path in paths]
+        super().__init__("Missing required answers:\n" + "\n".join(
+            f"  - {row['label']} ({row['path']}): {row['help']}" for row in self.fields))
+
+
 def merge(base, override, path=""):
     if not isinstance(override, dict):
         raise TypeError(f"{path or 'answers'} must be a mapping")
@@ -37,7 +45,7 @@ def defaults(preset, output_directory):
         "schema_version": 2,
         "execution": {"backend": "harbor_job"}, "tasks": {"catalog": None},
         "harness": {"name": "claude_code", "profile": None},
-        "harbor": {"python": None, "version": "0.23.0", "workers": [],
+        "harbor": {"python": sys.executable if not service else None, "version": "0.23.0", "workers": [],
                    "runner_transport": "ssh" if preset == "service-ssh" else "local",
                    "environment": {"runtime": "sandbox", "config": None} if sandbox else {"runtime": "docker"}},
         "gateway": {"host": "0.0.0.0" if service else "127.0.0.1", "port": 49184,
@@ -64,18 +72,35 @@ def defaults(preset, output_directory):
     return training, deployment
 
 
-def build_configs(answers, output_directory):
+def check_answers(answers, output_directory):
     if not isinstance(answers, dict) or set(answers) - {
-            "answers_version", "preset", "training", "deployment", "sandbox_config"}:
+            "answers_version", "preset", "training", "deployment", "sandbox_config", "local_environment"}:
         raise ValueError("unknown answers field or non-mapping answers")
     if type(answers.get("answers_version")) is not int or answers["answers_version"] != 1:
         raise ValueError("answers_version must be 1")
     preset = answers.get("preset")
     training, deployment = defaults(preset, output_directory)
+    merge(training, answers.get("training", {}), "training.")
+    merge(deployment, answers.get("deployment", {}), "deployment.")
+    if "local_environment" in answers:
+        if preset != "embedded-local":
+            raise ValueError("local_environment requires Local mode")
+        merge({"source_dir": str(ROOT), "python": sys.executable}, answers["local_environment"], "local_environment.")
+
+
+def build_configs(answers, output_directory):
+    check_answers(answers, output_directory)
+    preset = answers["preset"]
+    training, deployment = defaults(preset, output_directory)
     t = answers.get("training", {})
     d = answers.get("deployment", {})
     training = merge(training, t, "training.")
     deployment = merge(deployment, d, "deployment.")
+    if "local_environment" in answers:
+        environment = {"source_dir": str(ROOT), "python": sys.executable, **answers["local_environment"]}
+        deployment["manager"].update(source_dir=environment["source_dir"], controller_python=environment["python"])
+        deployment["gpu_target"].update(source_dir=environment["source_dir"], train_python=environment["python"])
+        training["harbor"]["python"] = environment["python"]
 
     # Repeated fields have one source unless both were explicitly supplied.
     for section, field, other_section, other_field in (
@@ -121,6 +146,8 @@ def build_configs(answers, output_directory):
         ("tasks", "catalog"), ("harness", "profile"), ("harbor", "python"),
         ("model", "checkpoint"), ("model", "reference"),
         ("gateway", "tokenizer_digest"), ("gateway", "template_digest"), ("gateway", "advertised_url"))]
+    required += [("deployment", "manager", "source_dir"), ("deployment", "manager", "controller_python"),
+                 ("deployment", "storage", "run_root")]
     if preset != "embedded-local":
         required += [("deployment", section, field) for section, field in (
             ("manager", "control_url"), ("manager", "gateway_url"),
@@ -131,10 +158,23 @@ def build_configs(answers, output_directory):
         missing.append("deployment.gpu_target.ssh.host")
     if preset == "service-ssh" and not deployment["rollout"]["workers"]:
         missing.append("deployment.rollout.workers")
+    for index, worker in enumerate(deployment["rollout"]["workers"]):
+        for key in ("id", "source_dir", "runner_python"):
+            if not worker.get(key):
+                missing.append(f"deployment.rollout.workers.{index}.{key}")
+        if not worker.get("ssh", {}).get("host"):
+            missing.append(f"deployment.rollout.workers.{index}.ssh.host")
+        if not worker.get("task_roots") or not worker["task_roots"][0]:
+            missing.append(f"deployment.rollout.workers.{index}.task_roots.0")
     if preset == "service-sandbox-local-runner" and not training["harbor"]["environment"].get("config"):
         missing.append("sandbox_config")
     if missing:
-        raise ValueError("Missing required answers: " + ", ".join(missing))
+        if "local_environment" in answers:
+            aliases = {"deployment.manager.source_dir": "local_environment.source_dir",
+                       "deployment.manager.controller_python": "local_environment.python",
+                       "training.harbor.python": "local_environment.python"}
+            missing = list(dict.fromkeys(aliases.get(path, path) for path in missing))
+        raise MissingAnswers(missing)
     for field in ("tokenizer_digest", "template_digest"):
         if training["gateway"][field] == "0" * 64:
             raise ValueError(f"gateway.{field}: a placeholder digest cannot be used by init")

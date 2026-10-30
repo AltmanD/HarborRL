@@ -23,6 +23,10 @@ const state = {
   logSource: "console",
   jobs: [],
   busy: false,
+  draft: null,
+  dirty: false,
+  issues: [],
+  example: null,
 };
 const fragment = new URLSearchParams(location.hash.slice(1));
 if (fragment.has("token")) {
@@ -48,12 +52,17 @@ async function api(path, body) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Request failed");
+  if (!response.ok) {
+    const error = new Error(result.error || "Request failed");
+    error.fields = result.fields || [];
+    throw error;
+  }
   return result;
 }
 async function action(callback) {
   if (state.busy) return;
   state.busy = true;
+  updateActions();
   $("#notice").hidden = true;
   try {
     await callback();
@@ -89,6 +98,8 @@ function defaultRoot() {
 function read(path) {
   const supplied = valueAt(state.answers, path);
   if (supplied !== undefined) return supplied;
+  if (path === "local_environment.source_dir") return read("deployment.manager.source_dir");
+  if (path === "local_environment.python") return read("deployment.manager.controller_python");
   if (path === "sandbox_config")
     return valueAt(state.answers, "training.harbor.environment.config");
   if (path === "deployment.storage.run_root")
@@ -106,7 +117,8 @@ function read(path) {
 function changed() {
   state.saved = null;
   state.preview = null;
-  $("#draft-state").textContent = "Draft";
+  state.dirty = true;
+  $("#draft-state").textContent = "Unsaved changes";
   $("#draft-state").className = "badge";
   updateActions();
   renderSummary();
@@ -118,19 +130,35 @@ function deriveWorkers() {
   }
 }
 function newAnswers(preset = "embedded-local") {
-  return { answers_version: 1, preset, training: {}, deployment: {} };
+  const answers = { answers_version: 1, preset, training: {}, deployment: {} };
+  if (preset === "embedded-local" && state.bootstrap) {
+    const manager = state.bootstrap.defaults[preset].deployment.manager;
+    answers.local_environment = { source_dir: manager.source_dir, python: manager.controller_python };
+  }
+  return answers;
 }
 function field(path, label, type = "text", options = {}) {
   const value = read(path),
     id = path.replaceAll(".", "-");
+  const help = state.bootstrap.field_help[path]?.help || options.hint ||
+    (path.includes("workers.") ? workerHelp(path) : "");
+  const invalid = state.issues.some((issue) => issue.path === path);
+  const attributes = `aria-describedby="${id}-help" aria-invalid="${invalid}" ${options.required ? 'aria-required="true" required' : ""}`;
   let control;
   if (options.choices)
-    control = `<select id="${id}" data-path="${path}">${options.choices.map((item) => `<option value="${item}" ${value === item ? "selected" : ""}>${item}</option>`).join("")}</select>`;
+    control = `<select id="${id}" data-path="${path}" ${attributes}>${options.choices.map((item) => `<option value="${item}" ${value === item ? "selected" : ""}>${item}</option>`).join("")}</select>`;
   else if (type === "checkbox")
     control = `<input id="${id}" data-path="${path}" type="checkbox" ${value ? "checked" : ""}>`;
   else
-    control = `<input id="${id}" data-path="${path}" type="${type}" value="${escapeHtml(value)}" ${type === "number" ? 'min="1" step="1"' : ""} ${options.step ? `step="${options.step}"` : ""} placeholder="${escapeHtml(options.placeholder || "")}" autocomplete="off" ${options.required ? "required" : ""}>`;
-  return `<div class="field ${options.full ? "full" : ""} ${options.required ? "required" : ""} ${type === "checkbox" ? "checkbox-field" : ""}">${type === "checkbox" ? control : ""}<label for="${id}">${label}</label>${type === "checkbox" ? "" : control}${options.hint ? `<small>${escapeHtml(options.hint)}</small>` : ""}</div>`;
+    control = `<input id="${id}" data-path="${path}" type="${type}" value="${escapeHtml(value)}" ${type === "number" ? 'min="1" step="1"' : ""} ${options.step ? `step="${options.step}"` : ""} placeholder="${escapeHtml(options.placeholder || "")}" autocomplete="off" ${attributes}>`;
+  return `<div class="field ${invalid ? "invalid-field" : ""} ${options.full ? "full" : ""} ${options.required ? "required" : ""} ${type === "checkbox" ? "checkbox-field" : ""}">${type === "checkbox" ? control : ""}<label for="${id}">${label}</label>${type === "checkbox" ? "" : control}<small id="${id}-help">${escapeHtml(help)}</small></div>`;
+}
+function workerHelp(path) {
+  if (path.endsWith("ssh.host")) return "SSH alias reachable from the controller.";
+  if (path.endsWith("source_dir")) return "Absolute HarborRL checkout directory on this worker.";
+  if (path.endsWith("runner_python")) return "Absolute Python executable with Harbor installed on this worker.";
+  if (path.includes("task_roots")) return "Absolute directory containing the task files on this worker.";
+  return "Unique worker name using letters, numbers and hyphens.";
 }
 const section = (title, content) =>
   `<section class="form-section"><div class="section-heading"><h2>${title}</h2></div><div class="form-grid">${content}</div></section>`;
@@ -146,7 +174,13 @@ function renderForm() {
       ["service-sandbox-local-runner", "Sandbox", "Controller + GPU", "box"],
     ];
     html = `<div class="section-heading"><h2>Deployment topology</h2><span class="badge">${service ? "Service" : "Embedded"}</span></div><div class="preset-options">${presets.map(([id, label, detail, ico]) => `<button class="preset ${preset === id ? "active" : ""}" data-preset="${id}" aria-pressed="${preset === id}">${icon(ico)}<div>${label}<small>${detail}</small></div></button>`).join("")}</div>`;
-    html += section(
+    if (!service) html += section(
+      "Shared local environment",
+      '<p class="full muted">Controller, GPU and rollout share this source directory and Python. Values were detected on the machine running HarborRL. Choose an environment with the required training and Harbor dependencies.</p>' +
+      field("local_environment.source_dir", "Shared source directory", "text", {full: true, required: true}) +
+      field("local_environment.python", "Shared Python interpreter", "text", {full: true, required: true}),
+    );
+    if (service) html += section(
       "Controller",
       field("deployment.manager.source_dir", "Source directory", "text", {
         full: true,
@@ -170,7 +204,7 @@ function renderForm() {
             })
           : ""),
     );
-    html += section(
+    if (service) html += section(
       "GPU target",
       (service
         ? field("deployment.gpu_target.ssh.host", "SSH destination", "text", {
@@ -191,7 +225,7 @@ function renderForm() {
     );
     if (preset === "service-ssh")
       html += `<section class="form-section"><div class="section-heading"><h2>Rollout workers</h2><button id="add-worker" class="secondary">${icon("plus")}Add worker</button></div><div id="worker-fields"></div></section>`;
-    else
+    else if (service)
       html += section(
         "Rollout runner",
         field("training.harbor.python", "Harbor runner Python", "text", {
@@ -242,6 +276,7 @@ function renderForm() {
     );
     html += section(
       "Tasks & agent",
+      '<div class="full input-starter"><button id="hello-inputs" class="secondary">Use bundled Hello World task & profile</button><p class="muted">Creates a task catalog and agent profile on this machine. Training still needs your model and runtime.</p></div>' +
       field("training.tasks.catalog", "Task catalog", "text", {
         full: true,
         required: true,
@@ -256,17 +291,10 @@ function renderForm() {
     );
     html += section(
       "Gateway fingerprints",
-      field("training.gateway.tokenizer_digest", "Tokenizer SHA-256", "text", {
-        full: true,
-        required: true,
-      }) +
-        field("training.gateway.template_digest", "Template SHA-256", "text", {
-          full: true,
-          required: true,
-        }) +
+      `<div class="full model-preparation" id="model-preparation"><p>Calculated automatically from the actual checkpoint tokenizer using the GPU target Python${service ? " over SSH" : ""}. No SHA-256 entry is needed.</p><button id="prepare-model" class="secondary">${icon("scan-line")}Prepare model</button><strong id="fingerprint-status">${read("training.gateway.tokenizer_digest") && read("training.gateway.template_digest") ? "Fingerprints prepared" : "Model preparation required"}</strong><details><summary>Calculated fingerprints</summary><dl><dt>Tokenizer</dt><dd>${escapeHtml(read("training.gateway.tokenizer_digest") || "Not calculated")}</dd><dt>Chat template</dt><dd>${escapeHtml(read("training.gateway.template_digest") || "Not calculated")}</dd></dl></details></div>` +
         (!service
           ? field("training.gateway.host", "Bind address") +
-            field("training.gateway.advertised_url", "Advertised origin", "url")
+            field("training.gateway.advertised_url", "Advertised origin", "url", {required: true})
           : ""),
     );
   } else if (state.step === 2) {
@@ -346,7 +374,25 @@ function renderForm() {
               ? null
               : Number(input.value)
             : input.value;
+      if (path.startsWith("local_environment.")) {
+        state.answers.local_environment = {
+          source_dir: read("local_environment.source_dir"),
+          python: read("local_environment.python"),
+        };
+      }
       setAt(state.answers, path, value);
+      state.issues = state.issues.filter((issue) => issue.path !== path);
+      input.setAttribute("aria-invalid", "false");
+      input.closest(".field").classList.remove("invalid-field");
+      renderIssues();
+      if (["training.model.checkpoint", "local_environment.python", "local_environment.source_dir",
+        "deployment.gpu_target.train_python", "deployment.gpu_target.source_dir", "deployment.gpu_target.ssh.host"].includes(path)) {
+        if (state.answers.training.gateway) {
+          delete state.answers.training.gateway.tokenizer_digest;
+          delete state.answers.training.gateway.template_digest;
+        }
+        if ($("#fingerprint-status")) $("#fingerprint-status").textContent = "Checkpoint or environment changed; prepare model again";
+      }
       // Loaded bundles contain both sides of repeated schema fields.
       const mirrors = {
         "deployment.manager.control_url": null,
@@ -406,11 +452,37 @@ function renderForm() {
         )
           return;
         state.answers = newAnswers(button.dataset.preset);
+        state.draft = null;
+        state.issues = [];
         changed();
         renderForm();
       }),
     ),
   );
+  $("#prepare-model")?.addEventListener("click", () => action(async () => {
+    $("#fingerprint-status").textContent = "Loading tokenizer and calculating fingerprints...";
+    try {
+      const result = await api("/api/prepare-model", {name: $("#config-name").value, answers: state.answers});
+      setAt(state.answers, "training.gateway.tokenizer_digest", result.fingerprints.tokenizer_digest);
+      setAt(state.answers, "training.gateway.template_digest", result.fingerprints.template_digest);
+      state.issues = state.issues.filter((issue) => !issue.path.includes("_digest"));
+      changed();
+      renderForm();
+      renderIssues();
+      notify(`Model fingerprints calculated on ${result.target}.`, true);
+    } catch (error) {
+      $("#fingerprint-status").textContent = "Preparation failed. Check the environment and checkpoint; you can save this draft.";
+      throw error;
+    }
+  }));
+  $("#hello-inputs")?.addEventListener("click", () => action(async () => {
+    const inputs = await api("/api/hello-inputs", {});
+    setAt(state.answers, "training.tasks.catalog", inputs.catalog);
+    setAt(state.answers, "training.harness.profile", inputs.profile);
+    state.issues = state.issues.filter((issue) => !["training.tasks.catalog", "training.harness.profile"].includes(issue.path));
+    changed(); renderForm();
+    notify("Bundled task catalog and agent profile are ready.", true);
+  }));
   $("#add-worker")?.addEventListener("click", () => {
     const workers = state.answers.deployment.rollout?.workers || [];
     workers.push({
@@ -427,6 +499,7 @@ function renderForm() {
     renderForm();
   });
   renderSummary();
+  renderIssues();
   updateActions();
   icons();
 }
@@ -436,7 +509,7 @@ function renderWorkers() {
     ? workers
         .map(
           (worker, index) =>
-            `<div class="worker-group"><div class="worker-heading"><h3>Worker ${index + 1}</h3><button class="icon-button" data-remove-worker="${index}" title="Remove worker" aria-label="Remove worker ${index + 1}">${icon("trash-2")}</button></div><div class="form-grid">${field(`deployment.rollout.workers.${index}.id`, "ID")}${field(`deployment.rollout.workers.${index}.ssh.host`, "SSH destination")}${field(`deployment.rollout.workers.${index}.source_dir`, "Source directory", "text", { full: true })}${field(`deployment.rollout.workers.${index}.runner_python`, "Runner Python", "text", { full: true })}${field(`deployment.rollout.workers.${index}.task_roots.0`, "Task root", "text", { full: true })}</div></div>`,
+            `<div class="worker-group"><div class="worker-heading"><h3>Worker ${index + 1}</h3><button class="icon-button" data-remove-worker="${index}" title="Remove worker" aria-label="Remove worker ${index + 1}">${icon("trash-2")}</button></div><div class="form-grid">${field(`deployment.rollout.workers.${index}.id`, "ID", "text", {required: true})}${field(`deployment.rollout.workers.${index}.ssh.host`, "SSH destination", "text", {required: true})}${field(`deployment.rollout.workers.${index}.source_dir`, "Source directory", "text", { full: true , required: true })}${field(`deployment.rollout.workers.${index}.runner_python`, "Runner Python", "text", { full: true , required: true })}${field(`deployment.rollout.workers.${index}.task_roots.0`, "Task root", "text", { full: true , required: true })}</div></div>`,
         )
         .join("")
     : '<p class="muted">No workers configured.</p>';
@@ -493,7 +566,7 @@ function renderSummary() {
     `<dl>${rows.map(([key, value]) => `<dt>${key}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl>`;
   $("#summary-status").textContent = state.saved
     ? "Saved configuration"
-    : "Unsaved configuration";
+    : state.draft && !state.dirty ? "Draft saved; continue when ready" : "Unsaved changes";
   icons();
 }
 function updateActions() {
@@ -506,6 +579,9 @@ function updateActions() {
     !state.preview ||
     state.preview.validation.status === "invalid" ||
     !!state.saved;
+  $("#save-draft").disabled = state.busy;
+  $("#save-draft").textContent = state.draft && !state.dirty ? "Draft saved" : "Save draft";
+  $("#prepare-model")?.toggleAttribute("disabled", state.busy);
   $("#step-description").textContent = `Step ${state.step + 1} of 4`;
   $$("[data-step]").forEach((button) => {
     button.classList.toggle(
@@ -520,6 +596,7 @@ function updateActions() {
   const active = state.jobs.some((job) =>
     ["running", "stopping", "unknown"].includes(job.state),
   );
+  $("#hello-world").disabled = state.busy || active;
   $("#dry-run").disabled = !state.saved || state.busy || active;
   $("#doctor").disabled =
     !state.saved || state.busy || active || !state.bootstrap?.live_supported;
@@ -537,16 +614,39 @@ async function preview(checkFiles = false) {
       check_files: checkFiles,
     });
     const result = state.preview.validation;
+    state.issues = [];
+    renderIssues();
     $("#validation-result").innerHTML =
       `<div class="check-status">${result.status === "invalid" ? "Changes required" : "Structure valid · runtime checks deferred"}</div>${result.checks.map((row) => `<div class="validation-row ${row.status}">${icon(row.status === "passed" ? "circle-check" : row.status === "failed" ? "circle-x" : "clock-3")}<div><strong>${escapeHtml(row.path)}</strong><p>${escapeHtml(row.message)}</p></div></div>`).join("")}`;
     renderPreview();
   } catch (error) {
-    $("#validation-result").textContent = error.message;
-    throw error;
+    state.issues = error.fields || [];
+    renderIssues();
+    $("#validation-result").textContent = state.issues.length
+      ? `${state.issues.length} required fields need attention. Follow the links above, or save this draft and return later.`
+      : error.message;
+    if (!state.issues.length) throw error;
   } finally {
     updateActions();
     icons();
   }
+}
+function renderIssues() {
+  const panel = $("#missing-fields");
+  panel.hidden = !state.issues.length;
+  panel.innerHTML = `<strong>${state.issues.length} required fields need attention</strong><p>You can save an incomplete draft at any time.</p><ul>${state.issues.map((issue, index) => `<li><button data-issue="${index}"><strong>${escapeHtml(issue.label)}</strong><span>${escapeHtml(issue.help)}</span></button></li>`).join("")}</ul>`;
+  $$("[data-issue]").forEach((button) => button.addEventListener("click", () => action(async () => {
+    const issue = state.issues[Number(button.dataset.issue)];
+    state.step = issue.step; renderForm();
+    let path = issue.path;
+    if (state.answers.preset === "embedded-local") {
+      if (path === "deployment.manager.source_dir") path = "local_environment.source_dir";
+      if (path === "deployment.manager.controller_python" || path === "training.harbor.python") path = "local_environment.python";
+    }
+    const target = path.includes("_digest") ? $("#prepare-model") :
+      document.getElementById(path.replaceAll(".", "-")) || $("#add-worker");
+    if (target) {target.focus(); target.scrollIntoView({block: "center", behavior: "smooth"});}
+  })));
 }
 function renderPreview() {
   $("#config-preview").textContent = state.preview?.files[state.file] || "";
@@ -569,12 +669,13 @@ function showView(view) {
   if (view === "runs") renderJobs();
 }
 function renderSaved() {
-  const configurations = state.bootstrap.configurations;
+  const configurations = [...(state.bootstrap.drafts || []).map((item) => ({...item, kind: "draft"})),
+    ...state.bootstrap.configurations];
   $("#saved-list").innerHTML = configurations.length
     ? configurations
         .map(
           (config) =>
-            `<button class="saved-item ${state.saved === config.id ? "selected" : ""}" data-config="${escapeHtml(config.id)}">${icon("file-code-2")}<span>${escapeHtml(config.id)}</span></button>`,
+            `<button class="saved-item ${state.saved === config.id ? "selected" : ""}" data-config="${escapeHtml(config.id)}" data-kind="${config.kind || "configuration"}">${icon(config.kind === "draft" ? "file-pen-line" : "file-check")}<span>${escapeHtml(config.id)}<small>${config.kind === "draft" ? "Draft" : "Runnable"}</small></span></button>`,
         )
         .join("")
     : '<span class="muted">No configurations yet</span>';
@@ -582,7 +683,7 @@ function renderSaved() {
     button.addEventListener("click", () =>
       action(async () => {
         if (
-          !state.saved &&
+          state.dirty &&
           !(await confirmAction(
             "Open saved configuration?",
             "The current draft will be replaced.",
@@ -590,16 +691,19 @@ function renderSaved() {
           ))
         )
           return;
+        const draft = button.dataset.kind === "draft";
         const config = await api(
-          `/api/configurations/${encodeURIComponent(button.dataset.config)}`,
+          `/api/${draft ? "drafts" : "configurations"}/${encodeURIComponent(button.dataset.config)}`,
         );
         state.answers = config.answers;
-        state.saved = config.id;
+        state.draft = draft ? {id: config.id, revision: config.revision} : null;
+        state.dirty = false; state.issues = [];
+        state.saved = draft ? null : config.id;
         $("#config-name").value = config.id;
-        $("#draft-state").textContent = "Saved";
+        $("#draft-state").textContent = draft ? "Draft saved" : "Runnable";
         $("#draft-state").className = "badge saved";
         showView("configuration");
-        await goStep(3);
+        await goStep(draft ? 0 : 3);
         renderSaved();
       }),
     ),
@@ -700,6 +804,7 @@ async function refreshJobs() {
 async function importAnswers(text) {
   const { answers } = await api("/api/import", { text });
   state.answers = answers;
+  state.draft = null; state.issues = [];
   changed();
   state.step = 0;
   renderForm();
@@ -760,19 +865,59 @@ async function initialize() {
   });
   $("#save").addEventListener("click", () =>
     action(async () => {
+      // Runnable bundles are immutable. Publish edits as a new numbered version.
+      const baseName = $("#config-name").value;
+      let name = baseName, index = 2;
+      while (state.bootstrap.configurations.some((item) => item.id === name)) name = `${baseName.slice(0, 56)}-v${index++}`;
       const saved = await api("/api/configurations", {
-        name: $("#config-name").value,
+        name,
         answers: state.answers,
       });
       state.saved = saved.id;
+      state.dirty = false;
       state.bootstrap.configurations.push(saved);
-      $("#draft-state").textContent = "Saved";
+      $("#draft-state").textContent = "Runnable";
       $("#draft-state").className = "badge saved";
       renderSaved();
       renderSummary();
       notify(`Saved ${saved.id}`, true);
     }),
   );
+  $("#save-draft").addEventListener("click", () => action(async () => {
+    const name = $("#config-name").value;
+    const saved = await api("/api/drafts", {name, answers: state.answers,
+      revision: state.draft?.id === name ? state.draft.revision : null});
+    state.draft = {id: saved.id, revision: saved.revision};
+    state.dirty = false;
+    state.bootstrap.drafts = [...state.bootstrap.drafts.filter((item) => item.id !== saved.id), saved];
+    $("#draft-state").textContent = "Draft saved";
+    $("#draft-state").className = "badge saved";
+    renderSaved(); renderSummary();
+    notify(`Draft saved: ${saved.id}. Reopen it from the sidebar to continue.`, true);
+  }));
+  $("#hello-world").addEventListener("click", () => action(async () => {
+    const job = await api("/api/hello", {});
+    state.selectedJob = job.id; state.logSource = "console"; $("#log-source").value = "console";
+    showView("runs"); await refreshJobs();
+  }));
+  $$("[data-example]").forEach((button) => button.addEventListener("click", () => {
+    state.example = state.bootstrap.examples.find((item) => item.id === button.dataset.example);
+    $("#example-title").textContent = state.example.title;
+    $("#example-notes").innerHTML = state.example.notes.map((note) => `<li>${escapeHtml(note)}</li>`).join("");
+    $("#example-content").textContent = JSON.stringify(state.example.answers, null, 2);
+    $("#example-dialog").showModal();
+  }));
+  $("#close-example").addEventListener("click", () => $("#example-dialog").close());
+  $("#download-example").addEventListener("click", () => download(`${state.example.id}-answers.json`, JSON.stringify(state.example.answers, null, 2), "application/json"));
+  $("#apply-example").addEventListener("click", () => action(async () => {
+    const example = structuredClone(state.example);
+    $("#example-dialog").close();
+    if (state.dirty && !(await confirmAction("Use this example?", "Replace the current unsaved answers with the reference recipe?", "Use example"))) return;
+    state.answers = example.answers; state.draft = null; state.issues = [];
+    $("#config-name").value = `${example.id === "embedded-local" ? "local" : "sandbox"}-${Date.now().toString(36)}`;
+    state.step = 0; changed(); renderForm();
+    notify("Example loaded as a draft. Replace example paths and hosts, use the bundled task inputs, then prepare your model.", true);
+  }));
   ["dry-run", "doctor", "train"].forEach((mode) =>
     $("#" + mode).addEventListener("click", () => action(() => startJob(mode))),
   );
@@ -787,6 +932,7 @@ async function initialize() {
       )
         return;
       state.answers = newAnswers();
+      state.draft = null; state.issues = [];
       $("#config-name").value =
         `experiment-${state.bootstrap.configurations.length + 1}`;
       state.step = 0;

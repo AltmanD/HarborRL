@@ -174,9 +174,12 @@ def test_publication_failure_lock_and_traversal(answers, tmp_path, monkeypatch):
 @pytest.mark.parametrize("confirmation", ["yes", "no"])
 def test_interactive(answers, tmp_path, monkeypatch, confirmation):
     t = answers["training"]
-    responses = iter(["1", sys.executable, sys.executable, t["tasks"]["catalog"], t["harness"]["profile"],
-                      t["model"]["checkpoint"], t["model"]["reference"], "", "1" * 64, "2" * 64,
-                      "", "", "1", "", "", "", "", confirmation])
+    from harborrl.options import fingerprints
+    monkeypatch.setattr(fingerprints, "prepare_model", lambda *a: {"fingerprints": {
+        "tokenizer_digest": "1" * 64, "template_digest": "2" * 64}})
+    responses = iter(["1", "", sys.executable, "", t["tasks"]["catalog"], t["harness"]["profile"],
+                      t["model"]["checkpoint"], t["model"]["reference"], "",
+                      "", "", "", "", "", "", "", confirmation])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
     output = tmp_path / "interactive"
@@ -302,7 +305,7 @@ def test_public_answer_templates(tmp_path):
     from harborrl.config import ROOT
     for file in sorted((ROOT / "examples/options").glob("*.yaml")):
         answers = yaml.safe_load(file.read_text())
-        with pytest.raises(ValueError, match="SHA-256"):
+        with pytest.raises(ValueError, match="Automatic model fingerprints"):
             build_config_bundle(answers, output_directory=tmp_path / file.stem)
         answers["training"]["gateway"].update(tokenizer_digest="1" * 64, template_digest="2" * 64)
         assert build_config_bundle(answers, output_directory=tmp_path / file.stem)["validation"]["status"] != "invalid"

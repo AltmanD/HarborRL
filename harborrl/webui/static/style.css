@@ -11,6 +11,38 @@
   --muted: #727a75;
   --red: #b83c3c;
 }
+.onboarding {
+  display: grid; gap: 12px; padding: 20px; margin: 0 0 22px;
+  border: 1px solid #c5ddcf; border-radius: 8px; background: #f5faf7;
+}
+.onboarding p { line-height: 1.6; margin-top: 5px; }
+.onboarding-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.missing-fields { border: 2px solid #bd4545; border-radius: 8px; padding: 18px; margin: 16px 0; background: #fff6f4; }
+.missing-fields > strong { color: #922f2f; font-size: 16px; }
+.missing-fields p { margin-top: 6px; }
+.missing-fields ul { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.missing-fields li { border-top: 1px solid #edc6c1; }
+.missing-fields button { width: 100%; text-align: left; display: grid; justify-content: start; padding: 12px 2px; gap: 5px; }
+.missing-fields strong, .missing-fields span { overflow-wrap: anywhere; }
+.missing-fields span { font-weight: 400; line-height: 1.5; }
+.invalid-field input, .invalid-field select, [aria-invalid="true"] { border: 2px solid #bd4545; background: #fff9f7; }
+.model-preparation { display: grid; gap: 12px; line-height: 1.6; }
+.model-preparation button { justify-self: start; }
+.model-preparation dl { margin: 10px 0; }
+.model-preparation dd { margin: 2px 0 10px; overflow-wrap: anywhere; font-family: monospace; font-size: 12px; }
+.input-starter { display: grid; gap: 8px; }
+.input-starter button { justify-self: start; }
+.form-grid > .full { grid-column: 1 / -1; }
+.saved-item small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+#example-dialog { width: min(860px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; }
+#example-content { max-height: 350px; }
+#example-notes { padding-left: 20px; line-height: 1.7; }
+@media (max-width: 600px) {
+  .onboarding { padding: 15px; }
+  .onboarding-actions button { flex: 1 1 100%; }
+  .page-heading { flex-wrap: wrap; gap: 12px; }
+  .toolbar { flex-wrap: wrap; }
+}
 * {
   box-sizing: border-box;
 }
@@ -999,6 +1031,11 @@ dialog p {
   }
   .page-heading .toolbar {
     gap: 2px;
+  }
+  .page-heading #save-draft {
+    font-size: 12px;
+    width: auto;
+    padding: 8px 10px;
   }
   .configuration-name {
     flex-wrap: wrap;
