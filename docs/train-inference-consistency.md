@@ -9,6 +9,16 @@ The three policies are the observed behavior `q`, frozen pre-update trainer
 drift is `log pθ - log p0`. The Native loss remains unchanged. No TIS, clipping
 correction, or new training objective is introduced.
 
+## Service Sampling Lock
+
+The service client computes the sampling digest from the original GroupRequest,
+normalizing equivalent JSON probabilities (`1` and `1.0`) the same way as the
+executor and Gateway. Each slot descriptor and trajectory identity must match
+that requested digest. Native readiness validation then binds every turn's
+sampling evidence to the trajectory identity. Internally consistent manifests
+from a different distribution are therefore rejected before conversion to
+training samples; a valid file digest alone is not sufficient.
+
 ## Configuration
 
 Native schema 2 accepts an optional `consistency` mapping. Its default mode is
