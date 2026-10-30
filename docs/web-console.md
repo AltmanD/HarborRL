@@ -95,7 +95,9 @@ After a crash or interrupted shutdown, previously running jobs appear as
 records and Sandbox cleanup evidence, then use **Confirm cleanup** to acknowledge
 that external cleanup is complete. This action records operator confirmation; it
 does not kill a stored PID or automatically relaunch a job. The server never
-signals a PID recovered from an old session.
+signals a PID recovered from an old session. Job details and **Confirm cleanup**
+remain available if a log was never created or cannot be read. The log panel
+reports that error explicitly; an unavailable log is not evidence of cleanup.
 
 ## Remote controller
 

@@ -785,9 +785,10 @@ async function loadLog() {
   const log = $("#job-log"),
     atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 25;
   const training = state.logSource === "training";
+  const logError = training ? result.training_log_error : result.log_error;
   log.textContent =
     (training ? result.training_text : result.text) ||
-    "Waiting for process output...";
+    (logError ? `Log unavailable: ${logError}` : "Waiting for process output...");
   if (atBottom) log.scrollTop = log.scrollHeight;
   $("#log-note").textContent =
     `${(training ? result.training_truncated : result.truncated) ? "Showing the last 64 KiB. " : ""}${training ? result.training_log_path || "No separate GPU log yet" : job.log_path} · Output: ${job.output_root}`;

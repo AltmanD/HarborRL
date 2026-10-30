@@ -150,6 +150,35 @@ def test_restart_blocks_unknown_job(console, answers, tmp_path):
     assert recovered.list()[0]["state"] == "interrupted"
 
 
+@pytest.mark.parametrize("unreadable", [False, True], ids=["missing", "permission-denied"])
+def test_restart_recovery_does_not_depend_on_log(server, console, monkeypatch, unreadable):
+    root = console.jobs.root / "interrupted"
+    root.mkdir()
+    (root / "job.json").write_text(json.dumps({
+        "id": "interrupted", "state": "running", "created_at": "2026-10-30",
+        "configuration": "test", "mode": "dry-run", "snapshot": str(root / "inputs"),
+        "output_root": str(root / "outputs"), "log_path": str(root / "console.log"),
+    }))
+    console.jobs.close()
+    console.jobs = Jobs(console.jobs.root)
+    if unreadable:
+        original = Path.open
+        def denied(path, *args, **kwargs):
+            if path == root / "console.log":
+                raise PermissionError("log access denied")
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "open", denied)
+    status, _, payload = request(server, console, "GET", "/api/jobs/interrupted")
+    details = json.loads(payload)
+    assert status == 200
+    assert details["job"]["state"] == "unknown"
+    assert details["log_error"] and not details["text"]
+    assert request(server, console, "POST", "/api/reconcile", {"id": "interrupted"})[0] == 400
+    assert request(server, console, "POST", "/api/reconcile", {
+        "id": "interrupted", "confirmed": True})[0] == 200
+    assert console.jobs.list()[0]["state"] == "interrupted"
+
+
 def test_workspace_lock(tmp_path):
     with workspace_lock(tmp_path), pytest.raises(ValueError, match="Another console"), workspace_lock(tmp_path):
         pass

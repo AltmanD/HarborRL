@@ -18,6 +18,18 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _log_tail(path):
+    """Log availability must not control access to job state or recovery."""
+    try:
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - 65536))
+            text = stream.read(65536).decode("utf-8", errors="replace")
+        return text, size, size > 65536, None
+    except OSError as exc:
+        return "", 0, False, f"{type(exc).__name__}: {exc}"
+
+
 class Jobs:
     def __init__(self, root):
         self.root = Path(root)
@@ -172,22 +184,18 @@ class Jobs:
             self._refresh()
             record = self.records[identifier]
             path = self.root / identifier / "console.log"
-            with path.open("rb") as stream:
-                size = stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, size - 65536))
-                tail = stream.read(65536).decode("utf-8", errors="replace")
-            result = {"job": dict(record), "text": tail, "bytes": size, "truncated": size > 65536,
-                      "training_text": "", "training_log_path": None, "training_truncated": False}
+            tail, size, truncated, error = _log_tail(path)
+            result = {"job": dict(record), "text": tail, "bytes": size, "truncated": truncated,
+                      "log_error": error, "training_text": "", "training_log_path": None,
+                      "training_truncated": False, "training_log_error": None}
             output = Path(record["output_root"])
             candidates = sorted(output.glob("training/*/train-stdout.log"))
             if candidates:
                 training_log = candidates[-1]
                 if training_log.resolve().is_relative_to(output.resolve()):
-                    with training_log.open("rb") as stream:
-                        length = stream.seek(0, os.SEEK_END)
-                        stream.seek(max(0, length - 65536))
-                        result.update(training_text=stream.read(65536).decode("utf-8", errors="replace"),
-                                      training_log_path=str(training_log), training_truncated=length > 65536)
+                    text, _, truncated, error = _log_tail(training_log)
+                    result.update(training_text=text, training_log_path=str(training_log),
+                                  training_truncated=truncated, training_log_error=error)
             return result
 
     def close(self):
