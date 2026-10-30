@@ -13,8 +13,14 @@ from urllib.parse import urlsplit
 import yaml
 
 from harborrl.options.catalog import build_catalog
+from harborrl.options.onboarding import (
+    FIELD_HELP,
+    describe_field,
+    load_draft,
+    reference_examples,
+    save_draft,
+)
 from harborrl.options.presets import PRESETS, MissingAnswers, check_answers, defaults
-from harborrl.options.onboarding import FIELD_HELP, describe_field, load_draft, reference_examples, save_draft
 from harborrl.options.validation import read_mapping, validate_mappings
 from harborrl.options.wizard import build_config_bundle, publish_bundle
 
