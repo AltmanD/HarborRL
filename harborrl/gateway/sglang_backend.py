@@ -90,19 +90,21 @@ class SGLangBackend:
         reported_ids = output.get("output_ids")
         if reported_ids is not None and reported_ids != output_ids:
             raise ValueError("serving output token IDs disagree with logprob evidence")
-        decoded = self.tokenizer.decode(output_ids, skip_special_tokens=True)
-        if not decoded.startswith(text) and not text.startswith(decoded.rstrip("\n")):
-            raise ValueError("serving text disagrees with output token IDs")
         finish = meta.get("finish_reason", {})
-        if finish.get("type") not in ("stop", "length"):
+        if not isinstance(finish, dict) or finish.get("type") not in ("stop", "length"):
             raise ValueError("unsupported serving finish reason")
+        matched = finish.get("matched")
+        stop_sequence = matched if (finish["type"] == "stop" and isinstance(matched, str)
+                                    and matched in converted["sampling"]["stop"]) else None
+        decoded = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+        # SGLang may omit the explicitly matched terminal stop string from text.
+        # Nothing else may be dropped, appended, or whitespace-normalized.
+        if decoded != text and not (stop_sequence and decoded == text + stop_sequence):
+            raise ValueError("serving text disagrees with output token IDs")
         blocks = self.model_adapter.parse_output(
             text, response_id=response_id, tools=converted["tools"]
         )
         has_tools = any(b["type"] == "tool_use" for b in blocks)
-        stop_sequence = finish.get("matched") if isinstance(finish.get("matched"), str) else None
-        if stop_sequence not in converted["sampling"]["stop"]:
-            stop_sequence = None
         eos_id = getattr(self.tokenizer, "eos_token_id", None)
         eos = finish["type"] == "stop" and finish.get("matched") == eos_id
         reason = "max_tokens" if finish["type"] == "length" else (

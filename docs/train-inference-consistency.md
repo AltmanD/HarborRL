@@ -62,6 +62,16 @@ fraction, bounded worst positions and histogram percentile **upper bounds**.
 They do not copy raw prompt or response text. TP duplicate counts are excluded.
 Distributed validation collects rank errors before all ranks reject.
 
+## Serving Text and Token Evidence
+
+The text passed to the model-output parser must equal the complete visible
+decoding of the generation token IDs. Prefix agreement, newline stripping and
+other whitespace normalization are not proof of the same response. The only
+accepted omission is an exact terminal stop string that both the request declares
+and SGLang's stop finish reason explicitly reports as matched. Extra text before
+or after that stop still rejects. The original generation IDs and logprobs remain
+unchanged.
+
 ## Validation and limitations
 
 Run `pytest -q tests/test_consistency.py` for the dependency-free checks. With
