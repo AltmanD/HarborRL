@@ -294,6 +294,36 @@ def test_embedded_explicit_conflict(answers, tmp_path):
         build_config_bundle(answers, output_directory=tmp_path / "conflict")
 
 
+@pytest.mark.parametrize("runner_python", [
+    "/opt/venv/./bin/python", "/opt/venv/bin/../bin/python",
+])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_runner_python_paths_use_the_same_lexical_normalization(answers, tmp_path, runner_python, explicit):
+    current = service_answers(answers, "service-ssh")
+    current["deployment"]["rollout"]["workers"][0]["runner_python"] = runner_python
+    if explicit:
+        current["training"]["harbor"]["python"] = "/opt/venv/bin/python"
+    output = tmp_path / "runner-path"
+    publish_bundle(build_config_bundle(current, output_directory=output), output)
+    report = validate_paths(output / "config.yaml", output / "deployment.yaml", check_files=True)
+    assert report["status"] == "valid_with_deferred_checks", report
+    current["training"]["harbor"]["python"] = "/different/venv/bin/python"
+    with pytest.raises(ValueError, match="runner_python"):
+        build_config_bundle(current, output_directory=tmp_path / "conflicting")
+
+
+def test_runner_python_symlinks_are_not_resolved_on_controller(answers, tmp_path):
+    current = service_answers(answers, "service-ssh")
+    python = tmp_path / "python"
+    python.symlink_to("/remote/venv/bin/python")
+    current["deployment"]["rollout"]["workers"][0]["runner_python"] = str(python)
+    bundle = build_config_bundle(current, output_directory=tmp_path / "symlink")
+    training = yaml.safe_load(bundle["files"]["config.yaml"])
+    deployment = yaml.safe_load(bundle["files"]["deployment.yaml"])
+    assert training["harbor"]["python"] == str(python)
+    assert deployment["rollout"]["workers"][0]["runner_python"] == str(python)
+
+
 def test_options_text_is_concise(capsys):
     assert main(["options"]) == 0
     output = capsys.readouterr().out
