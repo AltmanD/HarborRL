@@ -20,6 +20,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import threading
 import time
@@ -61,6 +62,8 @@ def validate_group_request(request):
     for key in ("group_id", "policy_version"):
         if not isinstance(request[key], str) or not request[key].strip():
             raise ServiceError(400, "invalid_request", f"{key} must be a nonempty string")
+    if request["group_id"] in (".", "..") or any(c in request["group_id"] for c in ("/", "\\")):
+        raise ServiceError(400, "invalid_request", "group_id must be one directory component")
     for key in ("rollout_id", "group_index"):
         if type(request[key]) is not int or request[key] < 0:
             raise ServiceError(400, "invalid_request", f"{key} must be a nonnegative integer")
@@ -219,10 +222,37 @@ class RolloutService:
         self._close_lock = threading.Lock()
         self._closing = self._closed = False
         self.cleanup_timeout = cleanup_timeout
+        self._store_lock = self._lock_run_directory()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._serve_loop,
                                        name="harborrl-rollout-service", daemon=True)
-        self.thread.start()
+        try:
+            self.thread.start()
+        except RuntimeError:
+            self.loop.close()
+            self._store_lock.close()
+            raise
+
+    def _lock_run_directory(self):
+        directory = self.run_root / "rollout-service"
+        directory.mkdir(parents=True, exist_ok=True)
+        stream = (directory / "service.lock").open("a+b")
+        try:
+            if os.name == "posix":
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                import msvcrt
+                stream.seek(0)
+                if not stream.read(1):
+                    stream.write(b"0")
+                    stream.flush()
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            stream.close()
+            raise ServiceError(409, "run_directory_busy", "another service owns this run directory") from exc
+        return stream
 
     def _serve_loop(self):
         asyncio.set_event_loop(self.loop)
@@ -288,6 +318,7 @@ class RolloutService:
                 if self.thread.is_alive():
                     raise ServiceError(409, "shutdown_timeout", "rollout executor thread has not stopped")
                 self.loop.close()
+                self._store_lock.close()
                 self._closed = True
             except Exception as exc:
                 # Keep the executor alive to finish pending cleanup; never claim
@@ -301,8 +332,9 @@ class RolloutService:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def register_run(self, run_id, manifest, *, token=None):
-        if not isinstance(run_id, str) or not run_id.strip():
-            raise ServiceError(400, "invalid_request", "run id required")
+        if (not isinstance(run_id, str) or not run_id.strip() or run_id in (".", "..")
+                or any(c in run_id for c in ("/", "\\"))):
+            raise ServiceError(400, "invalid_request", "run id must be one directory component")
         if not isinstance(manifest, dict) or not manifest:
             raise ServiceError(400, "invalid_request", "manifest must be a nonempty mapping")
         if manifest.get("run_id", run_id) != run_id:
@@ -318,14 +350,21 @@ class RolloutService:
                 return {"run_id": run_id, "state": "registered", "existed": True}
             if self.token is not None and token != self.token:
                 raise ServiceError(401, "unauthorized", "invalid manager run token")
+            manifest_path = self.run_root / "rollout-service/runs" / run_id / "manifest.json"
+            existed = manifest_path.exists()
+            if existed and digest(read_json(manifest_path)) != manifest_sha:
+                raise ServiceError(409, "conflict", "persisted run manifest differs from registration")
+            groups = self._restore_groups(run_id)
+            publish(manifest_path, manifest)
             generated = token is None
             if generated:
                 token = secrets.token_urlsafe(32)
             self.runs[run_id] = RunState(run_id=run_id, manifest=manifest,
                                          manifest_sha=manifest_sha,
-                                         token_digest=self._token_digest(token))
-        return {"run_id": run_id, "state": "registered", "existed": False,
-                **({"run_token": token} if generated else {})}
+                                         token_digest=self._token_digest(token), groups=groups,
+                                         drained=any(group.status == "unknown" for group in groups.values()))
+        return {"run_id": run_id, "state": "registered", "existed": existed,
+                "recovered_groups": len(groups), **({"run_token": token} if generated else {})}
 
     def authenticate(self, run_id, token):
         with self.lock:
@@ -411,6 +450,70 @@ class RolloutService:
     def _group_dir(self, run_id, group_id):
         return self.run_root / GROUP_DIR / run_id / group_id
 
+    def _restore_groups(self, run_id):
+        """Restore durable outcomes, never resume an unowned Runner or resample."""
+        groups = {}
+        directory = self.run_root / GROUP_DIR / run_id
+        for root in sorted(directory.glob("*")):
+            if not root.is_dir():
+                continue
+            request_path = root / "request.json"
+            if not request_path.exists():
+                if any((root / name).exists() for name in ("running.json", "result.json", "failed.json", "cancelled.json", "unknown.json")):
+                    raise ServiceError(500, "invalid_persisted_group", f"missing request: {root.name}")
+                continue
+            try:
+                request = validate_group_request(read_json(request_path))
+                if request["group_id"] != root.name:
+                    raise ValueError("group directory differs from request")
+                sha = request_digest(request)
+                terminal = [(name, status) for name, status in (
+                    ("result.json", "complete"), ("failed.json", "failed"), ("cancelled.json", "cancelled"))
+                    if (root / name).exists()]
+                if len(terminal) > 1:
+                    raise ValueError("conflicting terminal group records")
+                if terminal:
+                    name, status = terminal[0]
+                    record = read_json(root / name)
+                else:
+                    status = "unknown"
+                    record_path = root / "unknown.json" if (root / "unknown.json").exists() else root / "running.json"
+                    record = read_json(record_path) if record_path.exists() else {
+                        "group_id": root.name, "request_digest": sha, "created_at": time.time()}
+                if not isinstance(record, dict):
+                    raise TypeError("persisted group record must be a mapping")
+                if record.get("group_id") != root.name or record.get("request_digest") != sha:
+                    raise ValueError("persisted group does not match its request")
+                if terminal and record.get("status") != status:
+                    raise ValueError("terminal status differs from its record")
+                if status == "complete" and (
+                    record.get("run_id") != run_id or record.get("schema_version") != SERVICE_SCHEMA
+                    or record.get("policy_version") != request["policy_version"]
+                    or [slot["slot_id"] for slot in record["slots"]] != [slot["slot_id"] for slot in request["slots"]]
+                ):
+                    raise ValueError("persisted result identity differs from its request")
+                created_at = record.get("created_at")
+                if created_at is None and (root / "running.json").exists():
+                    running = read_json(root / "running.json")
+                    if (not isinstance(running, dict) or running.get("request_digest") != sha
+                            or running.get("group_id") != root.name):
+                        raise ValueError("running record differs from its request")
+                    created_at = running["created_at"]
+                group = GroupState(request, sha, status=status,
+                                   result=record if status == "complete" else None,
+                                   error=record.get("error"), created_at=created_at or 0)
+                if status == "unknown":
+                    group.error = "Service restarted before durable group completion; confirm Runner cleanup and use a new run"
+                    publish(root / "unknown.json", group.summary(include_result=False))
+                    marker = self.run_root / "native-rollouts/cleanup-required.json"
+                    if not marker.exists():
+                        publish(marker, {"run_id": run_id, "group_id": root.name,
+                                         "reason": "Interrupted group has unknown Runner cleanup status"})
+                groups[root.name] = group
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise ServiceError(500, "invalid_persisted_group", f"cannot restore {root.name}: {exc}") from exc
+        return groups
+
     def submit_group(self, run_id, request, *, wait=True):
         request = validate_group_request(request)
         sha = request_digest(request)
@@ -473,11 +576,12 @@ class RolloutService:
                 allow_synthetic=self.allow_synthetic)
             export_path = directory / "group-export.json"
             publish(export_path, export)
-            group.result = build_group_result(
+            result = build_group_result(
                 state.run_id, request, trajectories, runtime=state.runtime,
                 export={"path": str(export_path), "sha256": digest(export)})
+            publish(directory / "result.json", result)
+            group.result = result
             group.status = "complete"
-            publish(directory / "result.json", group.result)
         except asyncio.CancelledError:
             group.status = "cancelled"
             publish(directory / "cancelled.json", group.summary(include_result=False))
@@ -502,6 +606,8 @@ class RolloutService:
             group = state.groups.get(group_id)
         if group is None:
             raise ServiceError(404, "not_found", f"unknown group: {group_id}")
+        if group.status == "unknown":
+            raise ServiceError(409, "cleanup_required", "interrupted group has no owned Task; inspect Runner cleanup")
         self._cancel_groups([group])
         return group.summary()
 
@@ -526,6 +632,8 @@ class RolloutService:
             state = self._run(run_id)
             state.drained = True
             groups = list(state.groups.values())
+        if any(group.status == "unknown" for group in groups):
+            raise ServiceError(409, "cleanup_required", "interrupted groups require external cleanup confirmation")
         self._cancel_groups(groups)
         return {"run_id": run_id, "state": "cancelled",
                 "groups": {group.request["group_id"]: group.status for group in groups}}

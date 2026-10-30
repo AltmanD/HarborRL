@@ -37,6 +37,27 @@ the same run cannot bypass unresolved cleanup.
 
 There is no automatic deletion of potentially live resources during recovery.
 
+## Service Group Recovery
+
+One service owns a shared run directory at a time, enforced by an OS file lock
+that is released on clean shutdown or process exit. Registration persists the
+run manifest; changed registration content is rejected on restart.
+
+Registration also restores group requests and durable outcomes. Resubmitting
+an identical completed group returns its original result without sampling,
+changing timestamps or rewriting immutable records. Failed and cancelled groups
+retain their outcomes rather than implicitly retrying. Consumers still verify
+trajectory manifests before accepting a recovered result.
+
+A group without a durable terminal outcome becomes `unknown`, not `running`.
+The service cannot prove ownership or cleanup of that previous process's Runner,
+so it does not adopt an old PID, replay a partial attempt, or claim cancellation.
+It persists `unknown.json` and a cleanup-required marker, closes new admission
+for that run, and returns the unknown outcome immediately to polling clients.
+Inspect and confirm cleanup, retain the original evidence, then use a fresh run
+for further sampling. This is state/result recovery, not transparent continuation
+of an interrupted Agent or training optimizer.
+
 ## Embedded Event Loop
 
 Successive synchronous Slime rollout calls reuse one event loop and one cached
