@@ -14,6 +14,16 @@ def finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def canonical_sampling(sampling):
+    """Give equivalent JSON probabilities one representation before hashing."""
+    result = dict(sampling)
+    for key in ("temperature", "top_p"):
+        if not finite(result[key]):
+            raise ValueError(f"sampling {key} must be a finite number")
+        result[key] = float(result[key])
+    return result
+
+
 def encode(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
@@ -51,11 +61,12 @@ def publish(path, value):
         except FileExistsError:
             if path.read_bytes() != payload:
                 raise ValueError(f"conflicting immutable record: {path.name}")
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         os.unlink(temp)
     return path

@@ -8,6 +8,7 @@ agent or a restricted identity file.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -69,7 +70,9 @@ def _absolute_path(value, label):
     value = _nonempty_str(value, label)
     if not Path(value).is_absolute():
         raise DeploymentError(f"{label} must be an absolute path in target-machine semantics")
-    return value
+    # Match native config's lexical normalization, without resolving a target
+    # machine's filesystem (in particular virtualenv interpreter symlinks).
+    return os.path.normpath(value)
 
 
 def _plain_origin(url, label, *, port=None, allow_loopback=False):

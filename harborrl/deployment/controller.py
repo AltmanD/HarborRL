@@ -196,12 +196,14 @@ def dispatch_service(plan, deployment, *, checks):
                 target.cancel()
         raise
     finally:
-        with contextlib.suppress(Exception):
-            service.drain_run(run_id)
-        service.close()
-        if control_thread is not None:
-            control.shutdown()
-            control_thread.join(5)
-        control.server_close()
-        print(json.dumps({"run_dir": str(root), "exit_code": exit_code}), file=sys.stderr)
+        try:
+            # Service shutdown owns group cancellation, Runner cleanup and the
+            # final generation drain. A generation-only drain is not a join.
+            service.close()
+        finally:
+            if control_thread is not None:
+                control.shutdown()
+                control_thread.join(5)
+            control.server_close()
+            print(json.dumps({"run_dir": str(root), "exit_code": exit_code}), file=sys.stderr)
     return exit_code
