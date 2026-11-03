@@ -377,10 +377,13 @@ async def run_group(config, runtime_, *, entry, group_index, rollout_id,
         _run_slot(config, runtime_, slots, slot, entry, reward_profile))
         for slot in range(size)
     ]
+    joined = asyncio.gather(*tasks)
     try:
-        return list(await asyncio.gather(*tasks))
+        # Own cancellation here: gather would otherwise cancel the slots before
+        # this handler, whose second cancel can interrupt a slower finally.
+        return list(await asyncio.shield(joined))
     except BaseException:
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(joined, *tasks, return_exceptions=True)
         raise

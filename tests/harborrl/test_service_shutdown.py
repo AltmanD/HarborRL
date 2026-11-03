@@ -133,3 +133,35 @@ def test_default_cleanup_budget_covers_runner_and_sandbox_deadlines(tmp_path):
         assert service._cleanup_budget() > 315
     finally:
         service.close()
+
+
+def test_close_does_not_interrupt_slower_sibling_cleanup(tmp_path, monkeypatch):
+    from harborrl.rollout import runtime as runtime_module
+
+    started = threading.Event()
+    events, active = [], set()
+    async def slot(_config, _runtime, _slots, index, _entry, _reward):
+        active.add(index)
+        if len(active) == 2:
+            started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if index == 1:
+                await asyncio.sleep(.05)
+            events.append(f"slot {index} cleaned")
+    monkeypatch.setattr(runtime_module, "_run_slot", slot)
+    async def executor(config, current, request):
+        return await runtime_module.run_group(
+            config, current, entry=request["task"], group_index=0, rollout_id=0,
+            sampling_digest="sampling", policy_version="1", group_size=2)
+    service = service_for(tmp_path, executor, lambda: events.append("runtime closed"), cleanup_timeout=2)
+    service.runs["run"].config = SimpleNamespace(run_id="run", max_attempts=1, drain_timeout=1)
+    service.runs["run"].runtime.profile = {}
+    try:
+        service.submit_group("run", group_request(), wait=False)
+        assert started.wait(5)
+        service.close()
+        assert events == ["slot 0 cleaned", "slot 1 cleaned", "runtime closed"]
+    finally:
+        service.close()
