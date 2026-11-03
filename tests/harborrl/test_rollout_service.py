@@ -108,6 +108,34 @@ def group_request(group_index=0, policy_version="1", slots=2, task=TASK):
     }
 
 
+@pytest.mark.parametrize("probability", [1, 1.0], ids=["int", "float"])
+def test_service_executor_normalizes_sampling_lock(monkeypatch, probability):
+    from harborrl.rollout import service
+
+    request = group_request()
+    request["sampling"].update(temperature=probability, top_p=probability)
+
+    async def run_group(config, current, **kwargs):
+        assert kwargs["sampling_digest"] == digest(SAMPLING)
+        return []
+
+    monkeypatch.setattr(service, "run_group", run_group)
+    assert asyncio.run(service.default_executor(None, None, request)) == []
+    assert type(request["sampling"]["temperature"]) is type(probability)
+
+
+@pytest.mark.parametrize("probability", [1, 1.0], ids=["int", "float"])
+def test_slime_sampling_uses_the_same_numeric_lock(probability):
+    from harborrl.backends.slime_v032.rollout import sampling_params
+
+    args = SimpleNamespace(rollout_max_response_len=SAMPLING["max_new_tokens"],
+                           rollout_temperature=probability, rollout_top_p=probability)
+    params = sampling_params(args)
+    assert digest(params) == digest(SAMPLING)
+    assert type(params["temperature"]) is float
+    assert type(params["top_p"]) is float
+
+
 class ServiceHarness:
     def __init__(self, tmp_path, executor, **kwargs):
         self.tmp_path = tmp_path

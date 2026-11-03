@@ -2,7 +2,7 @@
 import json
 import re
 
-from harborrl.trajectories.native import finite
+from harborrl.trajectories.native import canonical_sampling, finite
 
 
 class ProtocolError(ValueError):
@@ -40,7 +40,7 @@ def convert(payload, *, model, max_output_tokens=8192, count_only=False):
     if type(max_tokens) is not int or not 0 < max_tokens <= max_output_tokens:
         raise ProtocolError("max_tokens outside profile budget")
     temperature, top_p, top_k = payload.get("temperature", 1.0), payload.get("top_p", 1.0), payload.get("top_k", -1)
-    # Initial raw-model recipe fixes the distribution; no silent normalization.
+    # Initial raw-model recipe fixes the distribution, regardless of JSON numeric type.
     if any(not finite(v) for v in (temperature, top_p)) or temperature != 1 or top_p != 1 or type(top_k) is not int or top_k != -1:
         raise ProtocolError("initial profile requires temperature=1, top_p=1, top_k=-1")
     stop = payload.get("stop_sequences", [])
@@ -129,9 +129,9 @@ def convert(payload, *, model, max_output_tokens=8192, count_only=False):
             messages.append(msg)
     if pending:
         raise ProtocolError("missing tool results in generation context")
-    return {"messages": messages, "tools": tools, "sampling": {
+    return {"messages": messages, "tools": tools, "sampling": canonical_sampling({
         "temperature": temperature, "top_p": top_p, "top_k": top_k,
-        "max_new_tokens": max_tokens, "stop": stop}}
+        "max_new_tokens": max_tokens, "stop": stop})}
 
 
 def parse_qwen_output(text, *, response_id, tools):

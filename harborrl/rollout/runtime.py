@@ -23,6 +23,27 @@ from harborrl.trajectories.native import Identity, RewardProfile, digest, read_j
 TASK_ENTRY_KEYS = {"id", "revision", "path", "task_digest", "reward_profile"}
 
 
+class CleanupRequiredError(RuntimeError):
+    """Harbor resources must be inspected before admitting more attempts."""
+
+
+class CleanupAdmission:
+    def __init__(self, root):
+        self.markers = set(Path(root).rglob("cleanup-required.json"))
+
+    def observe(self, root):
+        self.markers.update(Path(root).rglob("cleanup-required.json"))
+
+    def check(self):
+        self.markers = {path for path in self.markers if path.exists()}
+        if self.markers:
+            paths = ", ".join(str(path) for path in sorted(self.markers))
+            raise CleanupRequiredError(
+                "rollout cleanup unresolved; automatic retry blocked. "
+                "Inspect Harbor resources, then remove resolved cleanup-required.json "
+                f"markers before resuming: {paths}")
+
+
 @dataclass(frozen=True)
 class RolloutRuntimeConfig:
     """Deployment-independent description of one run's rollout machinery."""
@@ -155,6 +176,8 @@ class RolloutRuntime:
         self.profile = read_json(config.profile_path)
         self.rollout_root = self.run_root / "native-rollouts"
         self.rollout_root.mkdir(parents=True, exist_ok=True)
+        self.cleanup = CleanupAdmission(self.rollout_root)
+        self.cleanup.check()
         self.registry = TraceRegistry(self.run_root / "native-traces")
         self.semaphore = asyncio.Semaphore(config.concurrency_limit)
         if config.sandbox:
@@ -291,6 +314,10 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
     """Execute one slot with the group's shared identity and retry bookkeeping."""
     workers = config.workers
     overrides = config.task_worker_overrides
+    if not hasattr(runtime_, "cleanup"):
+        runtime_.cleanup = CleanupAdmission(runtime_.rollout_root)
+    cleanup = runtime_.cleanup
+    cleanup.check()
     for attempt_index in range(slots.max_attempts):
         identity = slots.start(str(slot))
         runner_host = overrides.get(entry["id"])
@@ -307,21 +334,30 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
             admission = runtime_.sandbox_admission.lease(task_binding(config.sandbox, entry['path']), root)
         try:
             async with admission, runtime_.semaphore:
-                ir = await run_attempt(
-                    identity,
-                    task_path=entry["path"],
-                    profile=runtime_.profile,
-                    gateway_url=config.gateway_url,
-                    runner_python=config.runner_python,
-                    runner_host=runner_host,
-                    root=root,
-                    registry=runtime_.registry,
-                    reward_profile=reward_profile,
-                    max_output_tokens=config.max_output_tokens,
-                    **({'sandbox': config.sandbox} if config.sandbox else {}),
-                )
+                cleanup.check()
+                try:
+                    ir = await run_attempt(
+                        identity,
+                        task_path=entry["path"],
+                        profile=runtime_.profile,
+                        gateway_url=config.gateway_url,
+                        runner_python=config.runner_python,
+                        runner_host=runner_host,
+                        root=root,
+                        registry=runtime_.registry,
+                        reward_profile=reward_profile,
+                        max_output_tokens=config.max_output_tokens,
+                        **({'sandbox': config.sandbox} if config.sandbox else {}),
+                    )
+                finally:
+                    cleanup.observe(root)
+                cleanup.check()
+        except CleanupRequiredError as exc:
+            slots.finish(str(slot), error=f"{type(exc).__name__}: {exc}")
+            raise
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError) as exc:
             slots.finish(str(slot), error=f"{type(exc).__name__}: {exc}")
+            cleanup.check()
             if config.sandbox and ((root / 'cleanup-required.json').exists() or runtime_.sandbox_admission.blocked):
                 raise RuntimeError('sandbox cleanup unresolved; automatic retry blocked') from exc
             continue
